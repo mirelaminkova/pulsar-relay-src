@@ -1,0 +1,22 @@
+---
+relay_install_dir: /opt/pulsar-relay
+relay_port: 8080
+# Override in SRC component parameters if ansible_fqdn is not the public hostname.
+relay_public_url: "https://{{ workspace_fqdn | default(ansible_fqdn, true) }}"
+relay_admin_co_group: src_co_admin
+relay_configure_src_proxy: true
+docker_install_compose_plugin: true
+docker_install_compose: false
+nginx_reverse_proxy_locations:
+  - name: pulsar-relay
+    location: /
+    proxy_pass: "http://127.0.0.1:{{ relay_port }}"
+    auth: noauth
+    proxy_set_header:
+      X-SRC-User: '""'
+      X-SRC-Proxy-Secret: '""'
+    proxy_http_version: "1.1"
+    proxy_buffering: "off"
+    proxy_read_timeout: "300"
+    proxy_send_timeout: "300"
+    client_max_body_size: "1m"

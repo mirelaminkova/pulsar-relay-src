@@ -1,0 +1,4 @@
+# Defaults for SRC component parameters. Secrets are generated on the workspace.
+relay_port: 8080
+relay_admin_co_group: src_co_admin
+# Add relay_public_url as a component parameter if hostname autodetection is wrong.

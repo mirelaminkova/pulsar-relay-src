@@ -1,0 +1,175 @@
+---
+- name: Install Pulsar Relay on SURF Research Cloud
+  hosts: "{{ lookup('env', 'variable_host') | default('localhost', true) }}"
+  become: true
+  pre_tasks:
+    - name: Validate CO group and installation path
+      ansible.builtin.assert:
+        that:
+          - relay_admin_co_group is match('^[A-Za-z_][A-Za-z0-9_-]*$')
+          - relay_install_dir is match('^/[A-Za-z0-9_./-]+$')
+
+    - name: Set workspace user and CO group facts as in the Galaxy component
+      ansible.builtin.include_role:
+        name: uusrc.general.fact_regular_users
+      when: relay_configure_src_proxy | bool
+
+    - name: Check supported workspace OS
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == 'Ubuntu'
+          - ansible_distribution_version in ['22.04', '24.04']
+        fail_msg: Choose an Ubuntu 22.04 or 24.04 SRC workspace.
+
+    - name: Check SRC nginx prerequisite
+      ansible.builtin.stat:
+        path: /etc/nginx/app-location-conf.d/authentication.conf
+      register: relay_nginx_prerequisite
+      when: relay_configure_src_proxy | bool
+
+    - name: Require SRC-Nginx before installing the relay
+      ansible.builtin.assert:
+        that: relay_nginx_prerequisite.stat.exists
+        fail_msg: Add SRC-Nginx before this component in the catalog item.
+      when: relay_configure_src_proxy | bool
+
+  roles:
+    - geerlingguy.docker
+
+  tasks:
+    - name: Create component directories
+      ansible.builtin.file:
+        path: "{{ relay_install_dir }}/{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0755"
+      loop: ['', files, scripts, relay_src, .policy]
+
+    - name: Copy deployment files
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ relay_install_dir }}/{{ item }}"
+        owner: root
+        group: root
+        mode: "0644"
+      loop:
+        - Dockerfile
+        - .dockerignore
+        - compose.yml
+        - files/valkey.conf
+        - scripts/configure.py
+        - scripts/sync_admins.py
+        - relay_src/__init__.py
+        - relay_src/policy.py
+        - relay_src/app.py
+      register: relay_deployment_files
+
+    - name: Generate and retain workspace credentials
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ relay_install_dir }}/scripts/configure.py"
+          - --directory
+          - "{{ relay_install_dir }}"
+          - --public-url
+          - "{{ relay_public_url }}"
+          - --port
+          - "{{ relay_port | string }}"
+      register: relay_configuration
+      changed_when: relay_configuration.stdout == 'changed'
+      no_log: true
+
+    - name: Initialize administrator membership from the SRC CO facts
+      ansible.builtin.copy:
+        content: "{{ {'members': (fact_co_groups | default({})).get(relay_admin_co_group, []) | reject('equalto', '') | list, 'expires_at': (ansible_date_time.epoch | int) + 180} | to_json }}"
+        dest: "{{ relay_install_dir }}/.policy/admins.json"
+        owner: root
+        group: root
+        mode: '0644'
+      when: relay_configure_src_proxy | bool
+      no_log: true
+
+    - name: Refresh CO administrator membership from managed groups
+      ansible.builtin.command:
+        argv: [python3, "{{ relay_install_dir }}/scripts/sync_admins.py", --group, "{{ relay_admin_co_group }}", --directory, "{{ relay_install_dir }}/.policy"]
+      changed_when: false
+
+    - name: Install CO membership refresh service and timer
+      ansible.builtin.template:
+        src: "templates/admin-sync.{{ item }}.j2"
+        dest: "/etc/systemd/system/pulsar-relay-admin-sync.{{ item }}"
+        owner: root
+        group: root
+        mode: '0644'
+      loop: [service, timer]
+
+    - name: Enable periodic CO administrator membership refresh
+      ansible.builtin.systemd:
+        name: pulsar-relay-admin-sync.timer
+        daemon_reload: true
+        enabled: true
+        state: started
+
+    - name: Build and start the persistent relay services
+      community.docker.docker_compose_v2:
+        project_src: "{{ relay_install_dir }}"
+        project_name: pulsar-relay
+        state: present
+        build: "{{ 'always' if relay_deployment_files.changed else 'policy' }}"
+        recreate: "{{ 'always' if relay_configuration.changed else 'auto' }}"
+        wait: true
+        wait_timeout: 180
+      no_log: true
+
+    - name: Configure SRC HTTPS reverse proxy
+      ansible.builtin.include_role:
+        name: uusrc.general.nginx_reverse_proxy
+      when: relay_configure_src_proxy | bool
+
+    - name: Install SRAM-protected management location
+      when: relay_configure_src_proxy | bool
+      block:
+        - name: Read proxy authentication key without logging it
+          ansible.builtin.slurp:
+            src: "{{ relay_install_dir }}/secrets.json"
+          register: _relay_secrets_file
+          no_log: true
+
+        - name: Configure trusted SRAM identity forwarding
+          ansible.builtin.template:
+            src: templates/admin-location.conf.j2
+            dest: /etc/nginx/app-location-conf.d/pulsar-relay-admin.conf
+            owner: root
+            group: www-data
+            mode: '0640'
+          vars:
+            _relay_proxy_secret: "{{ (_relay_secrets_file.content | b64decode | from_json).PULSAR_SRC_PROXY_SECRET }}"
+          no_log: true
+          diff: false
+
+        - name: Protect nginx configuration as in the Galaxy component
+          ansible.builtin.file:
+            path: /etc/nginx/app-location-conf.d
+            state: directory
+            owner: root
+            group: www-data
+            mode: '0750'
+
+        - name: Validate nginx configuration
+          ansible.builtin.command: nginx -t
+          changed_when: false
+
+        - name: Reload SRAM management configuration
+          ansible.builtin.service:
+            name: nginx
+            state: reloaded
+
+    - name: Check local relay readiness
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ relay_port }}/ready"
+        status_code: 200
+      register: relay_ready
+      retries: 12
+      delay: 5
+      until: relay_ready.status == 200
