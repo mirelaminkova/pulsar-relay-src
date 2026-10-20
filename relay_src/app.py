@@ -1,4 +1,5 @@
 """SRAM-authenticated management, with upstream bearer auth for machine clients."""
+from contextlib import asynccontextmanager
 import json
 import os
 from pathlib import Path
@@ -12,11 +13,14 @@ from pulsar_relay.auth import dependencies
 from pulsar_relay.auth.jwt import create_access_token
 from pulsar_relay.auth.models import User
 
+from .pair import ensure_pair_account
 from .policy import effective_permissions, trusted_admin
 
 
 config = json.loads(Path(os.environ['PULSAR_CONFIG_FILE']).read_text())
 proxy_secret = config['src_proxy_secret']
+pair_username = config.get('pair_username')
+pair_password = config.get('pair_password')
 policy_path = os.environ.get('SRC_ADMIN_POLICY_FILE', '/etc/relay-policy/admins.json')
 original_validate = upstream.validate_startup_secrets
 
@@ -42,6 +46,19 @@ async def current_user(request: Request, token_payload=Depends(dependencies.get_
 
 
 upstream.app.dependency_overrides[dependencies.get_current_user] = current_user
+upstream_lifespan = upstream.app.router.lifespan_context
+
+
+@asynccontextmanager
+async def lifespan(app):
+    async with upstream_lifespan(app):
+        # Storage is initialised by the upstream startup, so the built-in
+        # Galaxy/Pulsar pair account can only be ensured afterwards.
+        await ensure_pair_account(dependencies.get_user_storage(), pair_username, pair_password)
+        yield
+
+
+upstream.app.router.lifespan_context = lifespan
 
 
 class SRAMManagement:

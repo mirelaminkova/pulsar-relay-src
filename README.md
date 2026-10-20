@@ -4,6 +4,8 @@ An SRC Ansible component that installs [Galaxy Project's Pulsar Relay](https://g
 
 Galaxy and Pulsar each connect to the relay to exchange job messages. **Files still transfer directly between Pulsar and Galaxy**; Pulsar must be able to reach Galaxy's HTTPS endpoint. This component installs the relay service; a separate Pulsar worker runs the jobs.
 
+As in the [SRC Pulsar component](https://github.com/ErasmusMC-Bioinformatics/src-component-pulsar), the workspace root (`https://WORKSPACE_HOST/`) is an SRAM-protected **welcome page** with copy-and-paste connection details: the relay URL, a built-in Galaxy/Pulsar pair account created at deployment, the topic prefix, and ready-made `job_conf.yml` and `app.yml` snippets. The relay serves nothing at exactly `/`, so every other path still reaches the relay API.
+
 The relay is built from upstream commit `048689a2b55192fda43fb4422ba99630051f2e09`. Valkey uses the upstream deployment's `9.0-trixie` image tag. Base image tags and Python dependency ranges can change; the complete dependency set is not locked. Review upgrades and run the live test before changing the relay revision in `Dockerfile`.
 
 ## SRC catalog setup
@@ -17,11 +19,16 @@ The relay is built from upstream commit `048689a2b55192fda43fb4422ba99630051f2e0
    | `relay_public_url` | Workspace FQDN, falling back to `ansible_fqdn`, with HTTPS | Actual public workspace origin; override if hostname autodetection is wrong |
    | `relay_port` | `8080` | Local relay port behind nginx |
    | `relay_admin_co_group` | `src_co_admin` | SRC-managed CO administrator group, matching the Galaxy component default |
+   | `relay_pair_username` | `galaxy-pulsar` | Built-in non-admin relay account shared by one Galaxy/Pulsar pair |
+   | `relay_pair_password` | empty: generated | Optional password for that account, 16-128 of `A-Z a-z 0-9 . _ ~ + = @ % -`; leave empty to generate one on the workspace |
+   | `relay_topic_prefix` | `src` | Topic prefix shown on the welcome page; Galaxy and Pulsar must both use it |
+   | `relay_install_pulsar` | `false` | `true` also installs Pulsar on this workspace, already connected to the relay (see below) |
+   | `relay_pulsar_cvmfs` | `true` | With `relay_install_pulsar`, mounts the Galaxy project's CVMFS repositories (reference data and Singularity images) for that Pulsar; ignored without it |
 
 4. Create the workspace. Start with at least 2 vCPUs and 4 GB RAM; size for message volume. Keep it running while Galaxy and Pulsar need to communicate and choose an appropriate expiration date.
-5. Open `https://WORKSPACE_HOST/ready` to check readiness. CO administrators sign in through SRAM at `https://WORKSPACE_HOST/admin/docs`.
+5. Open `https://WORKSPACE_HOST/` (SRAM sign-in) for the welcome page with the Galaxy and Pulsar configuration, or `https://WORKSPACE_HOST/ready` to check readiness. CO administrators sign in through SRAM at `https://WORKSPACE_HOST/admin/docs`.
 
-The playbook installs Docker Engine and Compose v2, copies the deployment into `/opt/pulsar-relay`, generates credentials, starts the containers, and configures `uusrc.general.nginx_reverse_proxy`. It expects a dedicated workspace: the relay owns nginx's `/` location. Both long polling and WebSocket upgrades are supported by that SRC role.
+The playbook installs Docker Engine and Compose v2 (plus the CVMFS client and Apptainer when Pulsar is co-located, see below), copies the deployment into `/opt/pulsar-relay`, generates credentials, starts the containers, templates the welcome page into `/srv/static/index.html` (readable by nginx only), and configures `uusrc.general.nginx_reverse_proxy`. It expects a dedicated workspace: apart from the exact-match welcome location, the relay owns nginx's `/` location. Both long polling and WebSocket upgrades are supported by that SRC role.
 
 Browser administration uses **SRAM authentication and CO group membership**. The `/admin/` location requires SRC authentication and passes the verified username with a private proxy authentication key. The relay accepts management requests only when that username is in the configured CO administrator group. Client-supplied identity headers are cleared on the public machine API. Galaxy and Pulsar use the relay's bearer authentication outside `/admin/`. Only nginx's HTTPS endpoint should be reachable externally: port 8080 is bound to `127.0.0.1`, and Valkey has no published port.
 
@@ -60,13 +67,19 @@ Credentials are generated once in `secrets.json` (mode `0600`) and preserved acr
 
 Retrieve only the credential needed through your approved secret-management process on the workspace. Avoid dumping the secrets file into terminal recordings, chat, screenshots or logs. Docker administrators and host root can still read container-mounted secrets; Compose file mounts do not encrypt them at rest.
 
+### Built-in pair account and the welcome page
+
+`scripts/configure.py` generates `PULSAR_PAIR_PASSWORD` next to the other secrets and records `relay_pair_username` in the relay's configuration file. On every start the relay (`relay_src/pair.py`) creates that account with `read` and `write` permissions, or re-hashes its password after a rotation; it never receives `admin`. The welcome page at `https://WORKSPACE_HOST/` renders the account, the relay URL and `relay_topic_prefix` into the Galaxy and Pulsar snippets below, so connecting the default pair needs no manual registration. The page is served only after SRAM sign-in and is regenerated whenever the component reruns.
+
+### Administration and additional pairs
+
 Open `/admin/docs` and sign in with SRAM. As in [your Galaxy 26.0 component](https://github.com/mirelaminkova/src-component-galaxy/blob/26.0/tasks/set_config.yml), administrator membership comes from `fact_co_groups[relay_admin_co_group]`. There is no shared human administrator username or password. The relay creates a passwordless `sram:USERNAME` identity when an authorized administrator visits. Management authorization is checked on every request; it is not stored as a permanent administrator grant.
 
-From the SRAM-protected Swagger page, use `POST /auth/register` to create a **non-admin** account for a Galaxy/Pulsar pair. Requests on this page use your SRAM session automatically; the Swagger password authorization dialog is for machine accounts and is not needed for CO administration:
+For a second Galaxy/Pulsar pair, use `POST /auth/register` on the SRAM-protected Swagger page to create another **non-admin** account. Requests on this page use your SRAM session automatically; the Swagger password authorization dialog is for machine accounts and is not needed for CO administration:
 
 ```json
 {
-  "username": "galaxy-pulsar",
+  "username": "second-pair",
   "password": "REPLACE-WITH-A-LONG-RANDOM-PASSWORD",
   "permissions": ["read", "write"]
 }
@@ -74,9 +87,13 @@ From the SRAM-protected Swagger page, use `POST /auth/register` to create a **no
 
 **Use the same relay identity for both ends of a pair.** The pinned relay namespaces topics by user; two different user accounts cannot exchange messages merely by choosing the same topic prefix. Give separate pairs separate accounts. Topic prefixes must also match at both ends.
 
-The following password-based examples follow [Pulsar's relay configuration documentation](https://pulsar.readthedocs.io/en/latest/configure.html#message-queue-pulsar-relay). They are a compatibility path; current clients also support refresh credentials and OIDC device login, which requires separately configuring an OIDC provider on the relay. Ensure your installed Galaxy/Pulsar versions support the relay protocol before using these examples.
+### Galaxy and Pulsar configuration
 
-Pulsar's `app.yml`:
+The password-based examples below follow Galaxy 26.0's Pulsar runner (`pulsar-galaxy-lib` 0.15.14), which takes `relay_url`, `relay_username`, `relay_password` and `relay_topic_prefix` on the runner. Older Galaxy releases reject `relay_url`; Pulsar 0.15.13 or newer is needed for `relay_topic_prefix`. Current clients also support refresh credentials and OIDC device login, which requires separately configuring an OIDC provider on the relay.
+
+The SRC Galaxy component's **"Connect existing Pulsar"** parameter configures the HTTP (REST) runner only. A Galaxy component with relay support takes a separate one-line parameter, `src_galaxy_pulsar_relay_configs`, which the welcome page prints ready to paste; otherwise edit Galaxy's job configuration as below. The welcome page shows these snippets with the real values filled in.
+
+Pulsar's `app.yml` (`/mnt/pulsar/config/app.yml` on an SRC Pulsar workspace; an `https://` `message_queue_url` switches Pulsar to relay mode, the REST endpoint can stay):
 
 ```yaml
 message_queue_url: https://YOUR-RELAY-HOST
@@ -85,30 +102,50 @@ message_queue_password: YOUR-PAIR-PASSWORD
 relay_topic_prefix: src
 ```
 
-Galaxy's `job_conf.yml` (merge into the existing configuration):
+Galaxy's `job_conf.yml` (`/srv/galaxy/config/job_conf.yml` on an SRC Galaxy workspace; merge into the existing configuration):
 
 ```yaml
 runners:
   pulsar_relay:
     load: galaxy.jobs.runners.pulsar:PulsarMQJobRunner
-    proxy_url: https://YOUR-RELAY-HOST
-    proxy_username: galaxy-pulsar
-    proxy_password: YOUR-PAIR-PASSWORD
+    relay_url: https://YOUR-RELAY-HOST
+    relay_username: galaxy-pulsar
+    relay_password: YOUR-PAIR-PASSWORD
     relay_topic_prefix: src
+    galaxy_url: https://YOUR-GALAXY-HOST
 
 execution:
   environments:
     src_pulsar:
       runner: pulsar_relay
-      url: https://YOUR-GALAXY-HOST
-      jobs_directory: /mnt/pulsar/staging
+      jobs_directory: /mnt/pulsar/files/staging
+      manager: _default_
+      dependency_resolution: remote
+      default_file_action: remote_transfer
 
 tools:
   - id: YOUR-TOOL-ID
     environment: src_pulsar
 ```
 
-`url` in the Galaxy destination is **Galaxy's URL**, used by Pulsar for direct file transfers. Set `jobs_directory` to the staging path on your Pulsar worker. Preserve your current default destination and existing runners/tool mappings. Protect files containing passwords and restart Galaxy/Pulsar after configuration changes. Existing REST-based Pulsar workers need their communication configuration changed to relay mode; creating the relay workspace alone does not connect them.
+`galaxy_url` on the runner is **Galaxy's URL**, used by Pulsar for direct file transfers through Galaxy's `/api/` endpoints, so keep the Galaxy component's *API exposed* parameter enabled. Galaxy 26.0's relay runner ignores a `url` on the environment; without `galaxy_url` it falls back to Galaxy's `galaxy_infrastructure_url`. This matches usegalaxy.eu's relay runner for the NEMO endpoint. Set `jobs_directory` to the staging directory of your Pulsar worker: the SRC Pulsar component uses `<Pulsar Root>/files/staging`, which is `/mnt/pulsar/files/staging` without attached storage. Preserve your current default destination and existing runners/tool mappings. Protect files containing passwords and restart Galaxy (`systemctl restart 'galaxy-*'`) and Pulsar (`systemctl restart pulsar`) after configuration changes. Existing REST-based Pulsar workers need their communication configuration changed to relay mode; creating the relay workspace alone does not connect them.
+
+## Pulsar on the relay workspace
+
+With `relay_install_pulsar: true` the component also installs Pulsar on the same workspace, modelled on usegalaxy.eu's [NEMO login-node role](https://github.com/usegalaxy-eu/pulsar-nemo-login-role): `pulsar-app` 0.15.15 and `pulsar-relay-client` 0.2.1 in `/opt/pulsar/venv`, started webless with `pulsar-main` by a `pulsar` systemd unit (instead of NEMO's supervisord). It connects to the relay over `http://127.0.0.1:8080` with the built-in pair account and topic prefix, so its `app.yml` (`/opt/pulsar/config/app.yml`, mode `0640`) is written from the generated credentials and nothing is copied by hand. The playbook waits until Pulsar's capability snapshot topic (`<prefix>_pulsar_capabilities`) appears on the relay, which proves Pulsar connected.
+
+Jobs run on the workspace itself with the `queued_python` manager (no Slurm); `relay_pulsar_managers` can be overridden. `relay_pulsar_docker` (default `true`) adds the `pulsar` user to the `docker` group so Galaxy destinations can set `docker_enabled: true`; that group is root-equivalent on the host. Staging lives in `/var/lib/pulsar/staging`; set `relay_pulsar_root` to attached storage for larger data (an empty value, which is how SRC passes an unset parameter, keeps `/var/lib/pulsar`). The welcome page then shows `jobs_directory: /var/lib/pulsar/staging` for Galaxy.
+
+### Containers and CVMFS for the co-located Pulsar
+
+This Pulsar has no Conda, so a tool with requirements (`bwa`, `bowtie2`, ...) only runs in a container; `dependency_resolution: remote` alone finds nothing and the job fails. Galaxy resolves the container image and builds the container command line; Pulsar only executes it, so the runtime and every path in that command line must exist on this workspace:
+
+* `relay_pulsar_apptainer` (default `true`) installs Apptainer from the same PPA as the SRC Galaxy component, unprivileged (no setuid starter), with its `singularity` command. Galaxy environments can then set `singularity_enabled: true`; the welcome page includes it in the Galaxy parameter and job configuration snippets. The Pulsar unit keeps `NoNewPrivileges`; Ubuntu 24.04's AppArmor user-namespace profiles still apply under it.
+* `relay_pulsar_cvmfs` (component parameter, default `true`) runs [galaxyproject.cvmfs](https://github.com/galaxyproject/ansible-cvmfs) 0.5.0 as a client with the same settings as the SRC Galaxy component's `src_galaxy_cvmfs`: the `galaxyproject.org` repositories under `/cvmfs`, an 8 GB cache, and the European stratum 1 first. The playbook checks that `data.galaxyproject.org` and `singularity.galaxyproject.org` mount before Pulsar starts. With CVMFS on both workspaces, tool data table paths (`/cvmfs/data.galaxyproject.org/...`, which the Pulsar client passes through unchanged) and prebuilt BioContainer images (`/cvmfs/singularity.galaxyproject.org/all/...`) resolve on both sides. `/cvmfs` is added as a system-wide `bind path` in `/etc/apptainer/apptainer.conf`, so every container sees it without a `singularity_volumes` setting, which the Galaxy component's one-line relay parameter cannot carry (values may not contain commas).
+
+Which images Galaxy uses is decided by the Galaxy environment's `container_resolvers`. The SRC Galaxy component's relay environments with `singularity_enabled: true` use `explicit_singularity` and `mulled_singularity`, so Apptainer on this workspace pulls each image from `quay.io` on first use (outbound HTTPS needed; the first run of a tool is slow). Resolving from CVMFS instead needs a `cached_mulled_singularity` resolver with `cache_directory: /cvmfs/singularity.galaxyproject.org/all`, which the welcome page's job configuration snippet shows for hand-edited Galaxy installations; the Galaxy component does not yet expose `cache_directory`. Docker (`docker_enabled: true`) remains available as before.
+
+This combined mode suits SRC, where workspaces belong to a collaboration and expire: the relay and its Pulsar live and disappear together, and only Galaxy needs the welcome page values. Keep a standalone relay for several Pulsar workspaces, or use the Galaxy provider's relay (usegalaxy.eu runs one at `stargate.galaxyproject.eu`) when the Galaxy is not on SRC.
 
 ## Testing
 
@@ -118,9 +155,9 @@ ansible-playbook -i localhost, playbook.yml --syntax-check
 python3 scripts/test_relay.py
 ```
 
-The first command checks credential retention/migration, private file permissions, input validation, proxy identity verification, CO membership revocation, stale-policy rejection, and exclusion of secrets from Compose metadata. The Ansible check requires the installed dependencies from `requirements.yml`.
+The first command checks credential retention/migration, private file permissions, input validation, the built-in pair account bootstrap, proxy identity verification, CO membership revocation, stale-policy rejection, and exclusion of secrets from Compose metadata. The Ansible check requires the installed dependencies from `requirements.yml`.
 
-The live test builds the actual relay and starts Valkey in a randomly named disposable Compose project on a free localhost port. It checks readiness, rejection of anonymous access, trusted SRAM proxy identities, forged-header rejection, administrator revocation, non-admin machine permissions, publishing, long-poll delivery, and survival of users/topics/messages when both containers are recreated. It removes only its own test containers and volume. Use `--keep` to retain the test project for inspection. It does not test Galaxy job execution or SRC's public TLS/SRAM infrastructure; validate those on an SRC workspace with a real Galaxy/Pulsar pair.
+The live test builds the actual relay and starts Valkey in a randomly named disposable Compose project on a free localhost port. It checks readiness, rejection of anonymous access, the built-in pair account's login and lack of administrative rights, trusted SRAM proxy identities, forged-header rejection, administrator revocation, non-admin machine permissions, publishing, long-poll delivery, and survival of users/topics/messages when both containers are recreated. It removes only its own test containers and volume. Use `--keep` to retain the test project for inspection. It does not test Galaxy job execution or SRC's public TLS/SRAM infrastructure; validate those on an SRC workspace with a real Galaxy/Pulsar pair.
 
 The GitHub Actions workflow runs these checks when this repository is eventually published. The container deployment still requires live verification in a Docker-enabled environment.
 
@@ -147,4 +184,4 @@ Valkey stores messages, users, topics and authentication state in the named volu
 
 Container recreation and workspace reboots retain the named volume. **Workspace deletion or expiration can delete it**; a Docker volume is not an off-workspace backup. Retain the private secrets and take backups off the workspace before destroying it. Stop both containers before taking a consistent full-volume backup. For RDB-only backup/restore procedures, see [upstream persistence instructions](https://github.com/galaxyproject/pulsar-relay/blob/main/docs/CONFIGURATION.md#persistence-and-backups); with AOF enabled, copying `dump.rdb` alone does not restore the database.
 
-Do not run `docker compose down --volumes` on the production project. For credential rotation, edit the corresponding 64-character hexadecimal secret in `secrets.json`, rerun `scripts/configure.py` with the same public URL/port, then run `docker compose -p pulsar-relay up -d --force-recreate --wait` so the service processes load the new mounted contents. JWT rotation invalidates existing tokens. Coordinate password rotation with clients. Keep secrets out of terminal captures and support logs.
+Do not run `docker compose down --volumes` on the production project. For credential rotation, set a new `relay_pair_password` parameter and rerun the component, or edit the corresponding 64-character hexadecimal secret in `secrets.json`, rerun `scripts/configure.py` with the same public URL/port/pair username, then run `docker compose -p pulsar-relay up -d --force-recreate --wait` so the service processes load the new mounted contents. JWT rotation invalidates existing tokens. A rotated `PULSAR_PAIR_PASSWORD` is applied to the built-in account at the next relay start; rerun the component to refresh the welcome page, and update Galaxy and Pulsar. Coordinate password rotation with clients. Keep secrets out of terminal captures and support logs.

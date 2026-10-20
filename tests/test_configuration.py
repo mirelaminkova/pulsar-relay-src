@@ -30,7 +30,51 @@ class ConfigurationTest(unittest.TestCase):
             for name in ["secrets.json", ".env"]:
                 self.assertEqual(stat.S_IMODE((path / name).stat().st_mode), 0o600)
             values = json.loads(original)
-            self.assertEqual(len(set(values.values())), 3)
+            self.assertEqual(len(set(values.values())), 4)
+            self.assertIn('PULSAR_PAIR_PASSWORD', values)
+            relay = json.loads((path / '.secrets' / 'relay.json').read_text())
+            self.assertEqual(relay['pair_username'], 'galaxy-pulsar')
+            self.assertEqual(relay['pair_password'], values['PULSAR_PAIR_PASSWORD'])
+            # Changing the pair username only updates the relay configuration.
+            self.assertTrue(configure(directory, "https://new.example.org", pair_username='second.pair-1'))
+            self.assertEqual(original, (path / "secrets.json").read_bytes())
+            relay = json.loads((path / '.secrets' / 'relay.json').read_text())
+            self.assertEqual(relay['pair_username'], 'second.pair-1')
+
+    def test_wizard_pair_password_replaces_generated_one_and_is_kept(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prepare(directory)
+            path = Path(directory)
+            configure(directory, "https://relay.example.org")
+            generated = json.loads((path / "secrets.json").read_text())
+            chosen = "Chosen-pair.pass_2026~ok"
+            self.assertTrue(configure(directory, "https://relay.example.org", pair_password=chosen))
+            values = json.loads((path / "secrets.json").read_text())
+            self.assertEqual(values["PULSAR_PAIR_PASSWORD"], chosen)
+            for name in ["PULSAR_JWT_SECRET_KEY", "PULSAR_VALKEY_PASSWORD", "PULSAR_SRC_PROXY_SECRET"]:
+                self.assertEqual(values[name], generated[name])
+            relay = json.loads((path / ".secrets" / "relay.json").read_text())
+            self.assertEqual(relay["pair_password"], chosen)
+            # Leaving the parameter empty later keeps the chosen password.
+            self.assertFalse(configure(directory, "https://relay.example.org"))
+            self.assertEqual(json.loads((path / "secrets.json").read_text())["PULSAR_PAIR_PASSWORD"], chosen)
+
+    def test_rejects_weak_or_unsafe_pair_passwords(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prepare(directory)
+            for password in ["short-pass", "has space in it 123", "comma,in,password,1234", "colon:in:password:1234",
+                             "quote'password123456", "brace{password}12345", "x" * 129]:
+                with self.subTest(password=password), self.assertRaises(ValueError):
+                    configure(directory, "https://relay.example.org", pair_password=password)
+            self.assertFalse((Path(directory) / "secrets.json").exists())
+
+    def test_rejects_invalid_pair_usernames(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prepare(directory)
+            for username in ['', 'ab', '-leading', 'has space', 'x' * 51, 'quote"name', 'semi;colon', '{braces}']:
+                with self.subTest(username=username), self.assertRaises(ValueError):
+                    configure(directory, "https://relay.example.org", pair_username=username)
+            self.assertFalse((Path(directory) / "secrets.json").exists())
 
     def test_rejects_remote_http_and_dotenv_injection(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -84,6 +128,25 @@ class ConfigurationTest(unittest.TestCase):
                 self.assertEqual(old[name], new[name])
             self.assertNotIn('PULSAR_BOOTSTRAP_ADMIN_PASSWORD', new)
             self.assertIn('PULSAR_SRC_PROXY_SECRET', new)
+            self.assertIn('PULSAR_PAIR_PASSWORD', new)
+
+    def test_upgrade_adds_pair_password_without_changing_existing_secrets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prepare(directory)
+            path = Path(directory)
+            old = {'PULSAR_JWT_SECRET_KEY': 'a' * 64, 'PULSAR_VALKEY_PASSWORD': 'b' * 64,
+                   'PULSAR_SRC_PROXY_SECRET': 'c' * 64}
+            (path / 'secrets.json').write_text(json.dumps(old))
+            self.assertTrue(configure(directory, 'https://relay.example.org'))
+            new = json.loads((path / 'secrets.json').read_text())
+            for name, value in old.items():
+                self.assertEqual(value, new[name])
+            self.assertRegex(new['PULSAR_PAIR_PASSWORD'], r'^[a-f0-9]{64}$')
+            self.assertEqual(len(new), 4)
+            # A secrets file with unknown or missing keys is still rejected.
+            (path / 'secrets.json').write_text(json.dumps(dict(new, EXTRA='d' * 64)))
+            with self.assertRaises(ValueError):
+                configure(directory, 'https://relay.example.org')
 
 
 if __name__ == "__main__":
