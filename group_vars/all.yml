@@ -5,9 +5,49 @@ relay_port: 8080
 relay_public_url: "https://{{ workspace_fqdn | default(ansible_fqdn, true) }}"
 relay_admin_co_group: src_co_admin
 relay_configure_src_proxy: true
+# Built-in non-admin relay account shared by one Galaxy/Pulsar pair, and the
+# topic prefix both ends must use. Shown on the SRAM-protected welcome page.
+relay_pair_username: galaxy-pulsar
+# Optional pair password from the SRC wizard; empty means generated on the workspace.
+relay_pair_password: ""
+relay_topic_prefix: src
+relay_welcome_dir: /srv/static
+
+# Optional Pulsar on the same workspace, in relay mode (NEMO-style: pulsar-app
+# plus pulsar-relay-client in a venv, webless). It connects to this relay over
+# 127.0.0.1 with the built-in pair account, so no credentials are copied.
+relay_install_pulsar: false
+relay_pulsar_user: pulsar
+relay_pulsar_root: /var/lib/pulsar
+relay_pulsar_venv: /opt/pulsar/venv
+relay_pulsar_config_dir: /opt/pulsar/config
+relay_pulsar_staging_dir: "{{ relay_pulsar_root }}/staging"
+relay_pulsar_persistence_dir: "{{ relay_pulsar_root }}/persisted_data"
+# Versions run by usegalaxy.eu's NEMO endpoint against the relay; keep the
+# client in step with the relay release (v0.2.1 plus fixes in this component).
+relay_pulsar_version: "0.15.15"
+relay_pulsar_relay_client_version: "0.2.1"
+# Let Pulsar run tools in Docker containers (Docker is already installed for
+# the relay). Membership of the docker group is equivalent to root on the host.
+relay_pulsar_docker: true
+# No Slurm here: jobs run directly on this workspace.
+relay_pulsar_managers:
+  _default_:
+    type: queued_python
+    num_concurrent_jobs: "{{ [ansible_processor_vcpus | default(1) | int - 1, 1] | max }}"
+# Staging directory Galaxy must use (jobs_directory); the welcome page shows it.
+relay_galaxy_jobs_directory: "{{ relay_pulsar_staging_dir if relay_install_pulsar | bool else '/mnt/pulsar/files/staging' }}"
 docker_install_compose_plugin: true
 docker_install_compose: false
 nginx_reverse_proxy_locations:
+  # Welcome page with connection details, as in the SRC Pulsar component.
+  # The relay itself serves nothing at exactly "/" (404), so only this exact
+  # match is taken away from it; every other path still reaches the relay.
+  - name: pulsar-relay-welcome
+    location: '= /'
+    auth: sram
+    root: "{{ relay_welcome_dir }}/"
+    try_files: $uri/index.html =404
   - name: pulsar-relay
     location: /
     proxy_pass: "http://127.0.0.1:{{ relay_port }}"

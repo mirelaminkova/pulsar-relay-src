@@ -64,6 +64,10 @@ def run_test(root, keep=False):
         request(base, "/ready")
         request(base, "/api/v1/topics", expected=401)
         values = json.loads((work / "secrets.json").read_text())
+        # The built-in Galaxy/Pulsar pair account exists after startup and is never an administrator.
+        pair_token = login(base, "galaxy-pulsar", values["PULSAR_PAIR_PASSWORD"])
+        request(base, "/auth/users", token=pair_token, expected=403)
+        request(base, "/api/v1/topics", token=pair_token)
         write_policy(work / '.policy', ['integration-admin'])
         admin_headers = {'X-SRC-User': 'integration-admin',
                          'X-SRC-Proxy-Secret': values['PULSAR_SRC_PROXY_SECRET'], 'Origin': base}
@@ -102,7 +106,8 @@ def run_test(root, keep=False):
         result = request(base, "/messages/poll", "POST", poll, token)
         if not any(message["payload"] == payload for message in result["messages"]):
             raise RuntimeError("Message did not survive container recreation")
-        print("PASS: user, topic and message persisted after container recreation")
+        login(base, "galaxy-pulsar", values["PULSAR_PAIR_PASSWORD"])
+        print("PASS: user, topic, message and built-in pair account persisted after container recreation")
     finally:
         if keep:
             print(f"Test project retained in {work} (Compose project {project})")

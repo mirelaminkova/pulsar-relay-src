@@ -1,4 +1,10 @@
 # Defaults for SRC component parameters. Secrets are generated on the workspace.
 relay_port: 8080
 relay_admin_co_group: src_co_admin
+relay_pair_username: galaxy-pulsar
+# Leave empty to generate a password on the workspace (recommended).
+relay_pair_password: ""
+relay_topic_prefix: src
+# "true" also installs Pulsar on this workspace, connected to this relay.
+relay_install_pulsar: "false"
 # Add relay_public_url as a component parameter if hostname autodetection is wrong.

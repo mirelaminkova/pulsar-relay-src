@@ -1,0 +1,133 @@
+---
+# Pulsar in relay mode on the relay workspace itself, modelled on
+# usegalaxy-eu/pulsar-nemo-login-role, with systemd instead of supervisord.
+- name: Install Python venv support for Pulsar
+  ansible.builtin.apt:
+    name: [python3-venv, python3-dev, build-essential]
+    state: present
+    update_cache: true
+
+- name: Create the Pulsar system user
+  ansible.builtin.user:
+    name: "{{ relay_pulsar_user }}"
+    system: true
+    home: "{{ relay_pulsar_root }}"
+    create_home: false
+    shell: /usr/sbin/nologin
+    groups: "{{ ['docker'] if relay_pulsar_docker | bool else omit }}"
+    append: true
+
+- name: Create Pulsar directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ item.owner }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: "{{ relay_pulsar_venv | dirname }}", owner: root, mode: '0755'}
+    - {path: "{{ relay_pulsar_config_dir }}", owner: root, mode: '0755'}
+    - {path: "{{ relay_pulsar_root }}", owner: "{{ relay_pulsar_user }}", mode: '0750'}
+    - {path: "{{ relay_pulsar_staging_dir }}", owner: "{{ relay_pulsar_user }}", mode: '0750'}
+    - {path: "{{ relay_pulsar_persistence_dir }}", owner: "{{ relay_pulsar_user }}", mode: '0750'}
+
+# No `creates:`, so a version change in group_vars upgrades the venv.
+- name: Install pulsar-app and the relay client into the venv
+  ansible.builtin.pip:
+    name:
+      - "pulsar-app=={{ relay_pulsar_version }}"
+      - "pulsar-relay-client=={{ relay_pulsar_relay_client_version }}"
+      - psutil
+    virtualenv: "{{ relay_pulsar_venv }}"
+    virtualenv_command: python3 -m venv
+  notify: Restart Pulsar
+
+- name: Write Pulsar's app.yml with the relay connection
+  ansible.builtin.template:
+    src: templates/pulsar-app.yml.j2
+    dest: "{{ relay_pulsar_config_dir }}/app.yml"
+    owner: root
+    group: "{{ relay_pulsar_user }}"
+    mode: '0640'
+  vars:
+    _relay_pair_password: "{{ (_relay_secrets_file.content | b64decode | from_json).PULSAR_PAIR_PASSWORD }}"
+  no_log: true
+  diff: false
+  notify: Restart Pulsar
+
+- name: Write Pulsar's logging configuration
+  ansible.builtin.copy:
+    src: templates/pulsar-server.ini
+    dest: "{{ relay_pulsar_config_dir }}/server.ini"
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart Pulsar
+
+- name: Write Pulsar's job metrics configuration
+  ansible.builtin.copy:
+    dest: "{{ relay_pulsar_config_dir }}/job_metrics_conf.xml"
+    owner: root
+    group: root
+    mode: '0644'
+    content: |
+      <?xml version="1.0"?>
+      <job_metrics>
+          <core />
+          <cpuinfo />
+          <meminfo />
+          <hostname />
+      </job_metrics>
+  notify: Restart Pulsar
+
+- name: Install the Pulsar systemd unit
+  ansible.builtin.template:
+    src: templates/pulsar.service.j2
+    dest: /etc/systemd/system/pulsar.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify: Restart Pulsar
+
+- name: Enable and start Pulsar
+  ansible.builtin.systemd:
+    name: pulsar
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Apply pending Pulsar restarts before checking the connection
+  ansible.builtin.meta: flush_handlers
+
+- name: Sign in to the relay with the pair account
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ relay_port }}/auth/login"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      username: "{{ relay_pair_username }}"
+      password: "{{ (_relay_secrets_file.content | b64decode | from_json).PULSAR_PAIR_PASSWORD }}"
+    status_code: 200
+  register: _relay_pair_login
+  no_log: true
+
+# Pulsar 0.15.15 publishes a capability snapshot to "<prefix>_pulsar_capabilities"
+# when it binds to the relay, so its presence proves Pulsar reached the relay.
+- name: Wait until Pulsar has connected to the relay
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ relay_port }}/api/v1/topics"
+    headers:
+      Authorization: "Bearer {{ _relay_pair_login.json.access_token }}"
+    return_content: true
+  register: _relay_topics
+  vars:
+    _first_manager: "{{ relay_pulsar_managers | list | first }}"
+    _capabilities_topic: >-
+      {{ relay_topic_prefix ~ '_pulsar_capabilities' ~
+         ('' if _first_manager == '_default_' else '_' ~ _first_manager) }}
+  until: >-
+    _capabilities_topic in
+    ((_relay_topics.json | default([])) | map(attribute='topic_name') | list)
+  retries: 24
+  delay: 5
+  no_log: true
