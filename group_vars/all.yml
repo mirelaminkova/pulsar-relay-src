@@ -18,11 +18,14 @@ relay_welcome_dir: /srv/static
 # 127.0.0.1 with the built-in pair account, so no credentials are copied.
 relay_install_pulsar: false
 relay_pulsar_user: pulsar
-relay_pulsar_root: /var/lib/pulsar
+# Empty (as SRC passes an unset parameter) means /var/lib/pulsar; set it to
+# attached storage for larger data. Use _relay_pulsar_root, never this directly.
+relay_pulsar_root: ""
+_relay_pulsar_root: "{{ (relay_pulsar_root | default('', true) | string | trim) or '/var/lib/pulsar' }}"
 relay_pulsar_venv: /opt/pulsar/venv
 relay_pulsar_config_dir: /opt/pulsar/config
-relay_pulsar_staging_dir: "{{ relay_pulsar_root }}/staging"
-relay_pulsar_persistence_dir: "{{ relay_pulsar_root }}/persisted_data"
+relay_pulsar_staging_dir: "{{ _relay_pulsar_root }}/staging"
+relay_pulsar_persistence_dir: "{{ _relay_pulsar_root }}/persisted_data"
 # Versions run by usegalaxy.eu's NEMO endpoint against the relay; keep the
 # client in step with the relay release (v0.2.1 plus fixes in this component).
 relay_pulsar_version: "0.15.15"

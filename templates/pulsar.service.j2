@@ -9,7 +9,7 @@ Type=simple
 User={{ relay_pulsar_user }}
 Group={{ relay_pulsar_user }}
 UMask=022
-WorkingDirectory={{ relay_pulsar_root }}
+WorkingDirectory={{ _relay_pulsar_root }}
 # server.ini only configures logging; Pulsar reads app.yml from the same directory.
 ExecStart={{ relay_pulsar_venv }}/bin/pulsar-main --config_dir {{ relay_pulsar_config_dir }} --ini_path {{ relay_pulsar_config_dir }}/server.ini
 Restart=always

@@ -13,9 +13,12 @@
           - relay_topic_prefix is match('^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
           - (relay_pair_password | default('', true) | length == 0) or
             (relay_pair_password is match('^[A-Za-z0-9._~+=@%-]{16,128}$'))
+          - relay_port | string is match('^[0-9]{4,5}$')
+          - _relay_pulsar_root is match('^/[A-Za-z0-9_./-]+$')
         fail_msg: >-
           Check the component parameters: CO group, paths, pair username (3-50 of A-Z a-z 0-9 . _ -),
-          topic prefix, and pair password (empty, or 16-128 of A-Z a-z 0-9 . _ ~ + = @ % -).
+          topic prefix, pair password (empty, or 16-128 of A-Z a-z 0-9 . _ ~ + = @ % -),
+          relay port (digits), and relay_pulsar_root (empty, or an absolute path).
 
     - name: Set workspace user and CO group facts as in the Galaxy component
       ansible.builtin.include_role:

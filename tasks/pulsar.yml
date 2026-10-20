@@ -11,7 +11,7 @@
   ansible.builtin.user:
     name: "{{ relay_pulsar_user }}"
     system: true
-    home: "{{ relay_pulsar_root }}"
+    home: "{{ _relay_pulsar_root }}"
     create_home: false
     shell: /usr/sbin/nologin
     groups: "{{ ['docker'] if relay_pulsar_docker | bool else omit }}"
@@ -27,7 +27,7 @@
   loop:
     - {path: "{{ relay_pulsar_venv | dirname }}", owner: root, mode: '0755'}
     - {path: "{{ relay_pulsar_config_dir }}", owner: root, mode: '0755'}
-    - {path: "{{ relay_pulsar_root }}", owner: "{{ relay_pulsar_user }}", mode: '0750'}
+    - {path: "{{ _relay_pulsar_root }}", owner: "{{ relay_pulsar_user }}", mode: '0750'}
     - {path: "{{ relay_pulsar_staging_dir }}", owner: "{{ relay_pulsar_user }}", mode: '0750'}
     - {path: "{{ relay_pulsar_persistence_dir }}", owner: "{{ relay_pulsar_user }}", mode: '0750'}
 
@@ -39,7 +39,9 @@
       - "pulsar-relay-client=={{ relay_pulsar_relay_client_version }}"
       - psutil
     virtualenv: "{{ relay_pulsar_venv }}"
-    virtualenv_command: python3 -m venv
+    # Absolute path: SRC runs Ansible through `uv run`, whose own python3 may
+    # come first on PATH and is not usable by the pulsar system user.
+    virtualenv_command: /usr/bin/python3 -m venv
   notify: Restart Pulsar
 
 - name: Write Pulsar's app.yml with the relay connection
