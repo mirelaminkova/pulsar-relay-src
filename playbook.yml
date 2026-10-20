@@ -46,6 +46,11 @@
 
   roles:
     - geerlingguy.docker
+    # Galaxy's CVMFS repositories for the co-located Pulsar (reference data and
+    # Singularity images under /cvmfs), with the same role and settings as the
+    # SRC Galaxy component, so both ends of a job see the same paths.
+    - role: galaxyproject.cvmfs
+      when: _relay_pulsar_cvmfs | bool
 
   tasks:
     - name: Create component directories

@@ -33,6 +33,31 @@ relay_pulsar_relay_client_version: "0.2.1"
 # Let Pulsar run tools in Docker containers (Docker is already installed for
 # the relay). Membership of the docker group is equivalent to root on the host.
 relay_pulsar_docker: true
+# Install Apptainer (with its `singularity` command) so Galaxy environments can
+# set singularity_enabled: true on this Pulsar, as the SRC Galaxy component does
+# for its own singularity destination. Unprivileged: no setuid starter.
+relay_pulsar_apptainer: true
+# Mount the Galaxy project's CVMFS repositories on this workspace, as the Galaxy
+# component does with src_galaxy_cvmfs. Jobs then find the same reference data
+# (/cvmfs/data.galaxyproject.org) and Singularity images
+# (/cvmfs/singularity.galaxyproject.org) as Galaxy, so a tool's command line
+# and container image resolve on both sides. Only used with relay_install_pulsar.
+relay_pulsar_cvmfs: true
+_relay_pulsar_cvmfs: "{{ relay_install_pulsar | bool and relay_pulsar_cvmfs | default(true, true) | bool }}"
+# galaxyproject.cvmfs client settings, identical to the SRC Galaxy component.
+cvmfs_role: client
+galaxy_cvmfs_repos_enabled: true
+cvmfs_quota_limit: 8000
+galaxy_cvmfs_server_urls:
+  - domain: galaxyproject.org
+    use_geoapi: true
+    urls:
+      - "http://cvmfs1-ufr0.galaxyproject.eu/cvmfs/@fqrn@"
+      - "http://cvmfs1-psu0.galaxyproject.org/cvmfs/@fqrn@"
+# Apptainer apt repository, as in the SRC Galaxy component.
+apptainer_repo_url: https://ppa.launchpadcontent.net/apptainer/ppa/ubuntu
+apptainer_key_url: https://keyserver.ubuntu.com/pks/lookup?op=get&search=0xf6b0f5193d4f3301ef491ff0afe36534fc6218ae
+apptainer_key_location: /usr/share/keyrings/apptainer.asc
 # No Slurm here: jobs run directly on this workspace.
 relay_pulsar_managers:
   _default_:

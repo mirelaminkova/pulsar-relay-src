@@ -82,6 +82,22 @@
       </job_metrics>
   notify: Restart Pulsar
 
+- name: Install Apptainer for Singularity-enabled Galaxy environments
+  ansible.builtin.include_tasks: tasks/apptainer.yml
+  when: relay_pulsar_apptainer | bool
+
+# autofs mounts a repository on first access; this proves the client works
+# (keys, stratum 1 reachable) before Galaxy's first job depends on it.
+- name: Check that the Galaxy CVMFS repositories mount
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: _relay_cvmfs_repositories
+  failed_when: not _relay_cvmfs_repositories.stat.exists
+  loop:
+    - /cvmfs/data.galaxyproject.org/managed/location/tool_data_table_conf.xml
+    - /cvmfs/singularity.galaxyproject.org/all
+  when: _relay_pulsar_cvmfs | bool
+
 - name: Install the Pulsar systemd unit
   ansible.builtin.template:
     src: templates/pulsar.service.j2

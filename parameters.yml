@@ -7,4 +7,7 @@ relay_pair_password: ""
 relay_topic_prefix: src
 # "true" also installs Pulsar on this workspace, connected to this relay.
 relay_install_pulsar: "false"
+# With relay_install_pulsar, mount the Galaxy CVMFS repositories (reference data and
+# Singularity images under /cvmfs) for that Pulsar. "false" leaves CVMFS out.
+relay_pulsar_cvmfs: "true"
 # Add relay_public_url as a component parameter if hostname autodetection is wrong.
