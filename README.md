@@ -32,6 +32,8 @@ The playbook installs Docker Engine and Compose v2 (plus the CVMFS client and Ap
 
 Browser administration uses **SRAM authentication and CO group membership**. The `/admin/` location requires SRC authentication and passes the verified username with a private proxy authentication key. The relay accepts management requests only when that username is in the configured CO administrator group. Client-supplied identity headers are cleared on the public machine API. Galaxy and Pulsar use the relay's bearer authentication outside `/admin/`. Only nginx's HTTPS endpoint should be reachable externally: port 8080 is bound to `127.0.0.1`, and Valkey has no published port.
 
+The relay's rate limits (5 logins per minute per client address) use the client address from `X-Forwarded-For`. uvicorn trusts that header only from Docker's default bridge pools (`FORWARDED_ALLOW_IPS=172.16.0.0/12,192.168.0.0/16` in the `Dockerfile`), the only peers that can reach the container, and takes its rightmost untrusted entry: the address nginx appends. A forged header therefore no longer selects someone else's bucket. At the end of a deployment, `scripts/check_client_address.py` sends a request with a forged header through nginx and checks the relay logged the real address; set `relay_check_client_address: false` to skip it, for example if Docker uses custom address pools (then also adjust `FORWARDED_ALLOW_IPS`). Local workspace users who connect to `127.0.0.1:8080` directly, bypassing nginx, can still choose their address.
+
 ## Local development
 
 Requires Python 3.10+, Docker Engine, Compose v2 with `up --wait`, permission to use the Docker daemon, and outbound access to GitHub, PyPI and container registries. These commands work without Ansible or SRC:

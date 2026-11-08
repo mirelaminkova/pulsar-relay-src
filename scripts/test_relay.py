@@ -12,6 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from check_client_address import check as check_client_address
 from configure import configure
 from sync_admins import write_policy
 
@@ -34,6 +35,35 @@ def request(base, path, method="GET", data=None, token=None, form=False, expecte
         # Never include auth responses, credentials or token-bearing request bodies.
         raise RuntimeError(f"{method} {path}: expected HTTP {expected}, received {status}")
     return json.loads(payload) if payload else None
+
+
+def check_forwarded_for(command, base):
+    """Only the Docker gateway is trusted for X-Forwarded-For, and uvicorn takes its rightmost entry.
+
+    nginx appends $remote_addr, so a request through it carries "<client-chosen>, <real client>".
+    """
+    def logs():
+        return subprocess.run(command + ["logs", "--no-color", "relay"], check=True, capture_output=True,
+                              text=True).stdout
+    issue = check_client_address(base, logs, forwarded_for="203.0.113.77, 198.51.100.9", expected="198.51.100.9")
+    if issue:
+        raise RuntimeError("Client address check failed: " + issue)
+    # The refresh endpoint allows 10 requests per minute per client address.
+    def refresh(forwarded_for):
+        req = urllib.request.Request(base + "/auth/token/refresh", data=json.dumps({"refresh_token": "x.y"}).encode(),
+                                     headers={"Content-Type": "application/json", "X-Forwarded-For": forwarded_for})
+        try:
+            urllib.request.urlopen(req, timeout=15)
+        except urllib.error.HTTPError as error:
+            return error.code
+        return 200
+    codes = [refresh(f"203.0.113.{i}, 198.51.100.9") for i in range(11)]
+    if codes[:10] != [401] * 10 or codes[10] != 429:
+        raise RuntimeError(f"Unexpected refresh rate limiting: {codes}")
+    # A different forged entry does not escape the bucket; a different real client has its own.
+    if refresh("203.0.113.200, 198.51.100.9") != 429 or refresh("203.0.113.200, 198.51.100.10") != 401:
+        raise RuntimeError("Rate-limit buckets do not follow the proxy-appended client address")
+    print("PASS: relay keys clients on the proxy-appended address; forged X-Forwarded-For entries are ignored")
 
 
 def login(base, username, password):
@@ -68,6 +98,7 @@ def run_test(root, keep=False):
         pair_token = login(base, "galaxy-pulsar", values["PULSAR_PAIR_PASSWORD"])
         request(base, "/auth/users", token=pair_token, expected=403)
         request(base, "/api/v1/topics", token=pair_token)
+        check_forwarded_for(command, base)
         write_policy(work / '.policy', ['integration-admin'])
         admin_headers = {'X-SRC-User': 'integration-admin',
                          'X-SRC-Proxy-Secret': values['PULSAR_SRC_PROXY_SECRET'], 'Origin': base}

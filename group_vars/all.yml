@@ -5,6 +5,9 @@ relay_port: 8080
 relay_public_url: "https://{{ workspace_fqdn | default(ansible_fqdn, true) }}"
 relay_admin_co_group: src_co_admin
 relay_configure_src_proxy: true
+# After deployment, check through nginx that the relay keys rate limits on the
+# real client address (see scripts/check_client_address.py).
+relay_check_client_address: true
 # Built-in non-admin relay account shared by one Galaxy/Pulsar pair, and the
 # topic prefix both ends must use. Shown on the SRAM-protected welcome page.
 relay_pair_username: galaxy-pulsar
