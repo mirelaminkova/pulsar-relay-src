@@ -80,6 +80,7 @@
         - relay_src/policy.py
         - relay_src/pair.py
         - relay_src/app.py
+        - relay_src/healthcheck.py
       register: relay_deployment_files
 
     - name: Generate and retain workspace credentials

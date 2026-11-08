@@ -180,7 +180,30 @@ sudo docker compose -p pulsar-relay logs --tail 100 relay
 sudo docker compose -p pulsar-relay restart relay
 ```
 
-Valkey stores messages, users, topics and authentication state in the named volume `pulsar-relay_valkey-data`. AOF (`everysec`) and RDB snapshots are enabled, and `noeviction` prevents memory pressure from deleting authentication state. At the configured 512 MB store limit, writes fail rather than evict data. Adjust `files/valkey.conf` and workspace sizing if needed. Message history is capped at 100,000 entries per topic; time-based expiry is disabled to preserve the latest state of idle topics.
+Valkey stores messages, users, topics and authentication state in the named volume `pulsar-relay_valkey-data`. AOF (`everysec`) and RDB snapshots are enabled, and `noeviction` prevents memory pressure from deleting authentication state. At the configured 512 MB store limit, writes fail rather than evict data. Adjust `files/valkey.conf` and workspace sizing if needed.
+
+### Storage limits
+
+Reading a message does not delete it, so `compose.yml` bounds what Valkey keeps:
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| `PULSAR_PERSISTENT_TIER_RETENTION` | `604800` (7 days) | Messages older than 7 days are trimmed on the next publish to their topic, and a topic idle for 7 days expires. Pulsar and Galaxy replay a backlog from their cursor after an outage of up to 7 days. |
+| `PULSAR_MAX_MESSAGES_PER_TOPIC` | `2000` | Bounds memory under load, which retention alone does not. Beyond it the oldest entries are dropped silently, so it must exceed the largest backlog you expect (2000 queued jobs). |
+| `PULSAR_ACCESS_TOKEN_EXPIRE_MINUTES` | `60` | Password clients log in about once an hour instead of every 5 minutes. |
+| `PULSAR_REFRESH_TOKEN_TTL_DAYS` | `7` | Each password login stores a refresh-token record for this long (about 1.2 KB). Refresh-token clients must refresh within 7 days. |
+
+Valkey memory per entry, measured with Pulsar 0.15.15's own client code building the messages and the relay storing them in Valkey 9.0 (`MEMORY USAGE` of the stream divided by its length):
+
+| Message | JSON | Valkey per entry |
+| --- | --- | --- |
+| `job_setup`, 4 inputs, 3 outputs, 4 KB command line | 8.3 KB | 10.3 KB |
+| `job_setup`, 40 inputs, 10 outputs, 16 KB command line | 41 KB | 49 KB |
+| `job_status_update`, final, 1 KB stdout / 4 KB stderr | 6.3 KB | 7.2 KB |
+| `job_status_update`, final, 64 KB stderr | 67 KB | 82 KB |
+| `job_status_update` (running), `job_status_request` | < 0.1 KB | 0.1 KB |
+
+With every topic of a pair full to the cap with the large rows, 2000 x (49 KB + 82 KB) is about 260 MB, half of `maxmemory 512mb`; with typical jobs it is about 35 MB. Pulsar sends stdout/stderr up to 1 MiB each (the relay rejects bodies over 1 MiB), so a few huge final statuses can still use more: raise `maxmemory` with the workspace size if your tools print a lot. The relay healthcheck (`relay_src/healthcheck.py`) reports the relay unhealthy once Valkey is above 90% of `maxmemory` or refuses a write; check it with `docker compose -p pulsar-relay ps`. Docker does not restart an unhealthy container, and the playbook's start-up wait fails while it is unhealthy.
 
 Container recreation and workspace reboots retain the named volume. **Workspace deletion or expiration can delete it**; a Docker volume is not an off-workspace backup. Retain the private secrets and take backups off the workspace before destroying it. Stop both containers before taking a consistent full-volume backup. For RDB-only backup/restore procedures, see [upstream persistence instructions](https://github.com/galaxyproject/pulsar-relay/blob/main/docs/CONFIGURATION.md#persistence-and-backups); with AOF enabled, copying `dump.rdb` alone does not restore the database.
 
