@@ -76,6 +76,12 @@ class FakeValkeyHandler(socketserver.StreamRequestHandler):
         return args
 
     def handle(self):
+        try:
+            self.serve_commands()
+        except ConnectionError:
+            pass  # The probe stops reading after the first error reply.
+
+    def serve_commands(self):
         server = self.server
         authenticated = server.password is None
         while (args := self.read_command()) is not None:
