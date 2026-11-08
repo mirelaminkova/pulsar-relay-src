@@ -20,7 +20,7 @@ The relay is built from upstream commit `048689a2b55192fda43fb4422ba99630051f2e0
    | `relay_port` | `8080` | Local relay port behind nginx |
    | `relay_admin_co_group` | `src_co_admin` | SRC-managed CO administrator group, matching the Galaxy component default |
    | `relay_pair_username` | `galaxy-pulsar` | Built-in non-admin relay account shared by one Galaxy/Pulsar pair |
-   | `relay_pair_password` | empty: generated | Optional password for that account, 16-128 of `A-Z a-z 0-9 . _ ~ + = @ % -`; leave empty to generate one on the workspace |
+   | `relay_pair_password` | empty: generated | Optional password for that account, 24-128 letters and digits (`A-Z a-z 0-9`); leave empty to generate one on the workspace. A value accepted by an earlier version (16-128 of `A-Z a-z 0-9 . _ ~ + = @ % -`) keeps working while it is re-sent unchanged |
    | `relay_topic_prefix` | `src` | Topic prefix shown on the welcome page; Galaxy and Pulsar must both use it |
    | `relay_install_pulsar` | `false` | `true` also installs Pulsar on this workspace, already connected to the relay (see below) |
    | `relay_pulsar_cvmfs` | `true` | With `relay_install_pulsar`, mounts the Galaxy project's CVMFS repositories (reference data and Singularity images) for that Pulsar; ignored without it |
