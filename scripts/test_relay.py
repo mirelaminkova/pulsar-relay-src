@@ -40,49 +40,6 @@ def login(base, username, password):
     return request(base, "/auth/login", "POST", {"username": username, "password": password}, form=True)["access_token"]
 
 
-def valkey_cli(command, *lines):
-    """Run valkey-cli commands in the Valkey container, authenticated as compose's healthcheck does."""
-    script = 'printf "AUTH %s\\n%s\\n" "$(sed -n "s/^requirepass //p" /run/secrets/valkey_config)" "$1" | valkey-cli --raw'
-    result = subprocess.run(command + ["exec", "-T", "valkey", "sh", "-c", script, "sh", "\n".join(lines)],
-                            check=True, capture_output=True, text=True)
-    return result.stdout.splitlines()[1:]  # drop the AUTH reply
-
-
-def relay_healthcheck(command):
-    return subprocess.run(command + ["exec", "-T", "relay", "python", "-m", "relay_src.healthcheck"],
-                          capture_output=True, text=True)
-
-
-def check_bounded_storage(command, base, token):
-    """Retention, per-topic cap and token lifetimes reach the relay; the healthcheck sees a full Valkey."""
-    settings = subprocess.run(command + ["exec", "-T", "relay", "python", "-c",
-                              "from pulsar_relay.config import settings as s; print(s.persistent_tier_retention, "
-                              "s.max_messages_per_topic, s.access_token_expire_minutes, s.refresh_token_ttl_days)"],
-                              check=True, capture_output=True, text=True).stdout.split()[-4:]
-    if settings != ["604800", "2000", "60", "7"]:
-        raise RuntimeError(f"Unexpected relay storage/token settings: {settings}")
-    streams = valkey_cli(command, "SCAN 0 MATCH stream:topic:*src-installation-probe COUNT 1000 TYPE stream")[1:]
-    if len(streams) != 1 or not 0 < int(valkey_cli(command, "TTL " + streams[0])[0]) <= 604800:
-        raise RuntimeError("Published topic stream has no retention TTL")
-    if relay_healthcheck(command).returncode != 0:
-        raise RuntimeError("Relay healthcheck fails on a healthy deployment")
-    # Simulate a full Valkey: writes are refused (noeviction) while /ready still says ready.
-    valkey_cli(command, "CONFIG SET maxmemory 1mb")
-    try:
-        request(base, "/api/v1/messages", "POST", {"topic": "src-installation-probe", "payload": {"full": True}}, token,
-                expected=500)
-        if request(base, "/ready")["ready"] is not True:
-            raise RuntimeError("Expected upstream /ready to miss the full Valkey")
-        unhealthy = relay_healthcheck(command)
-        if unhealthy.returncode == 0 or "UNHEALTHY" not in unhealthy.stdout:
-            raise RuntimeError("Relay healthcheck did not detect a full Valkey")
-    finally:
-        valkey_cli(command, "CONFIG SET maxmemory 512mb")
-    if relay_healthcheck(command).returncode != 0:
-        raise RuntimeError("Relay healthcheck did not recover after Valkey memory was freed")
-    print("PASS: 7 d retention, 2000-message cap and 60 min / 7 d tokens; healthcheck detects a full Valkey")
-
-
 def run_test(root, keep=False):
     if not shutil.which("docker"):
         raise RuntimeError("Docker is required for the live integration test; install Docker Engine and Compose v2")
@@ -140,11 +97,11 @@ def run_test(root, keep=False):
         result = request(base, "/messages/poll", "POST", poll, token)
         if not any(message["payload"] == payload for message in result["messages"]):
             raise RuntimeError("Published message was not delivered through long polling")
-        print("PASS: SRAM admin mapping/revocation, forged-header rejection, machine permissions and message delivery")
         response = request(base, "/auth/login", "POST", {"username": username, "password": password}, form=True)
         if response["expires_in"] != 3600:
             raise RuntimeError("Access tokens do not last 60 minutes")
         check_bounded_storage(command, base, token)
+        print("PASS: SRAM admin mapping/revocation, forged-header rejection, machine permissions and message delivery")
         # Recreate both containers to prove storage survives beyond their lifetimes.
         # The test's named volume is kept by down (without --volumes).
         subprocess.run(command + ["down"], check=True)
@@ -162,6 +119,49 @@ def run_test(root, keep=False):
             # Only this randomly named disposable project is removed.
             subprocess.run(command + ["down", "--volumes", "--remove-orphans"], check=False)
             shutil.rmtree(work)
+
+
+def valkey_cli(command, *lines):
+    """Run valkey-cli commands in the Valkey container, authenticated as compose's healthcheck does."""
+    script = 'printf "AUTH %s\\n%s\\n" "$(sed -n "s/^requirepass //p" /run/secrets/valkey_config)" "$1" | valkey-cli --raw'
+    result = subprocess.run(command + ["exec", "-T", "valkey", "sh", "-c", script, "sh", "\n".join(lines)],
+                            check=True, capture_output=True, text=True)
+    return result.stdout.splitlines()[1:]  # drop the AUTH reply
+
+
+def relay_healthcheck(command):
+    return subprocess.run(command + ["exec", "-T", "relay", "python", "-m", "relay_src.healthcheck"],
+                          capture_output=True, text=True)
+
+
+def check_bounded_storage(command, base, token):
+    """Retention, per-topic cap and token lifetimes reach the relay; the healthcheck sees a full Valkey."""
+    settings = subprocess.run(command + ["exec", "-T", "relay", "python", "-c",
+                              "from pulsar_relay.config import settings as s; print(s.persistent_tier_retention, "
+                              "s.max_messages_per_topic, s.access_token_expire_minutes, s.refresh_token_ttl_days)"],
+                              check=True, capture_output=True, text=True).stdout.split()[-4:]
+    if settings != ["604800", "2000", "60", "7"]:
+        raise RuntimeError(f"Unexpected relay storage/token settings: {settings}")
+    streams = valkey_cli(command, "SCAN 0 MATCH stream:topic:*src-installation-probe COUNT 1000 TYPE stream")[1:]
+    if len(streams) != 1 or not 0 < int(valkey_cli(command, "TTL " + streams[0])[0]) <= 604800:
+        raise RuntimeError("Published topic stream has no retention TTL")
+    if relay_healthcheck(command).returncode != 0:
+        raise RuntimeError("Relay healthcheck fails on a healthy deployment")
+    # Simulate a full Valkey: writes are refused (noeviction) while /ready still says ready.
+    valkey_cli(command, "CONFIG SET maxmemory 1mb")
+    try:
+        request(base, "/api/v1/messages", "POST", {"topic": "src-installation-probe", "payload": {"full": True}}, token,
+                expected=500)
+        if request(base, "/ready")["ready"] is not True:
+            raise RuntimeError("Expected upstream /ready to miss the full Valkey")
+        unhealthy = relay_healthcheck(command)
+        if unhealthy.returncode == 0 or "UNHEALTHY" not in unhealthy.stdout:
+            raise RuntimeError("Relay healthcheck did not detect a full Valkey")
+    finally:
+        valkey_cli(command, "CONFIG SET maxmemory 512mb")
+    if relay_healthcheck(command).returncode != 0:
+        raise RuntimeError("Relay healthcheck did not recover after Valkey memory was freed")
+    print("PASS: 7 d retention, 2000-message cap and 60 min / 7 d tokens; healthcheck detects a full Valkey")
 
 
 if __name__ == "__main__":
