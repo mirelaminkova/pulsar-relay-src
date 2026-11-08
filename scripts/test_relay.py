@@ -37,10 +37,6 @@ def request(base, path, method="GET", data=None, token=None, form=False, expecte
     return json.loads(payload) if payload else None
 
 
-def login(base, username, password):
-    return request(base, "/auth/login", "POST", {"username": username, "password": password}, form=True)["access_token"]
-
-
 def check_forwarded_for(command, base):
     """Only the Docker gateway is trusted for X-Forwarded-For, and uvicorn takes its rightmost entry.
 
@@ -70,6 +66,10 @@ def check_forwarded_for(command, base):
     print("PASS: relay keys clients on the proxy-appended address; forged X-Forwarded-For entries are ignored")
 
 
+def login(base, username, password):
+    return request(base, "/auth/login", "POST", {"username": username, "password": password}, form=True)["access_token"]
+
+
 def run_test(root, keep=False):
     if not shutil.which("docker"):
         raise RuntimeError("Docker is required for the live integration test; install Docker Engine and Compose v2")
@@ -92,13 +92,13 @@ def run_test(root, keep=False):
         write_policy(work / '.policy', ['integration-admin'])
         subprocess.run(command + ["up", "--build", "--wait", "--wait-timeout", "180"], check=True)
         request(base, "/ready")
-        check_forwarded_for(command, base)
         request(base, "/api/v1/topics", expected=401)
         values = json.loads((work / "secrets.json").read_text())
         # The built-in Galaxy/Pulsar pair account exists after startup and is never an administrator.
         pair_token = login(base, "galaxy-pulsar", values["PULSAR_PAIR_PASSWORD"])
         request(base, "/auth/users", token=pair_token, expected=403)
         request(base, "/api/v1/topics", token=pair_token)
+        check_forwarded_for(command, base)
         write_policy(work / '.policy', ['integration-admin'])
         admin_headers = {'X-SRC-User': 'integration-admin',
                          'X-SRC-Proxy-Secret': values['PULSAR_SRC_PROXY_SECRET'], 'Origin': base}
