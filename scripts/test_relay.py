@@ -12,6 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from check_client_address import check as check_client_address
 from configure import configure
 from sync_admins import write_policy
 
@@ -40,6 +41,35 @@ def login(base, username, password):
     return request(base, "/auth/login", "POST", {"username": username, "password": password}, form=True)["access_token"]
 
 
+def check_forwarded_for(command, base):
+    """Only the Docker gateway is trusted for X-Forwarded-For, and uvicorn takes its rightmost entry.
+
+    nginx appends $remote_addr, so a request through it carries "<client-chosen>, <real client>".
+    """
+    def logs():
+        return subprocess.run(command + ["logs", "--no-color", "relay"], check=True, capture_output=True,
+                              text=True).stdout
+    issue = check_client_address(base, logs, forwarded_for="203.0.113.77, 198.51.100.9", expected="198.51.100.9")
+    if issue:
+        raise RuntimeError("Client address check failed: " + issue)
+    # The refresh endpoint allows 10 requests per minute per client address.
+    def refresh(forwarded_for):
+        req = urllib.request.Request(base + "/auth/token/refresh", data=json.dumps({"refresh_token": "x.y"}).encode(),
+                                     headers={"Content-Type": "application/json", "X-Forwarded-For": forwarded_for})
+        try:
+            urllib.request.urlopen(req, timeout=15)
+        except urllib.error.HTTPError as error:
+            return error.code
+        return 200
+    codes = [refresh(f"203.0.113.{i}, 198.51.100.9") for i in range(11)]
+    if codes[:10] != [401] * 10 or codes[10] != 429:
+        raise RuntimeError(f"Unexpected refresh rate limiting: {codes}")
+    # A different forged entry does not escape the bucket; a different real client has its own.
+    if refresh("203.0.113.200, 198.51.100.9") != 429 or refresh("203.0.113.200, 198.51.100.10") != 401:
+        raise RuntimeError("Rate-limit buckets do not follow the proxy-appended client address")
+    print("PASS: relay keys clients on the proxy-appended address; forged X-Forwarded-For entries are ignored")
+
+
 def run_test(root, keep=False):
     if not shutil.which("docker"):
         raise RuntimeError("Docker is required for the live integration test; install Docker Engine and Compose v2")
@@ -62,6 +92,7 @@ def run_test(root, keep=False):
         write_policy(work / '.policy', ['integration-admin'])
         subprocess.run(command + ["up", "--build", "--wait", "--wait-timeout", "180"], check=True)
         request(base, "/ready")
+        check_forwarded_for(command, base)
         request(base, "/api/v1/topics", expected=401)
         values = json.loads((work / "secrets.json").read_text())
         # The built-in Galaxy/Pulsar pair account exists after startup and is never an administrator.

@@ -76,6 +76,7 @@
         - files/valkey.conf
         - scripts/configure.py
         - scripts/sync_admins.py
+        - scripts/check_client_address.py
         - relay_src/__init__.py
         - relay_src/policy.py
         - relay_src/pair.py
@@ -220,6 +221,21 @@
     - name: Install Pulsar on this workspace, connected to the relay
       ansible.builtin.include_tasks: tasks/pulsar.yml
       when: relay_install_pulsar | bool
+
+    # Last, so a failure leaves everything else applied. The relay's login rate
+    # limit is keyed on the client address: it must be the one nginx saw, not a
+    # forged X-Forwarded-For and not the Docker gateway shared by all clients.
+    - name: Check that the relay sees real client addresses through nginx
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ relay_install_dir }}/scripts/check_client_address.py"
+          - --public-url
+          - "{{ relay_public_url }}"
+          - --directory
+          - "{{ relay_install_dir }}"
+      changed_when: false
+      when: relay_configure_src_proxy | bool and relay_check_client_address | bool
 
   handlers:
     - name: Restart Pulsar
