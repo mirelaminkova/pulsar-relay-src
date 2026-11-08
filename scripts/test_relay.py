@@ -40,6 +40,35 @@ def login(base, username, password):
     return request(base, "/auth/login", "POST", {"username": username, "password": password}, form=True)["access_token"]
 
 
+def read_constraints(path):
+    pins = {}
+    for line in Path(path).read_text().splitlines():
+        line = line.split('#', 1)[0].strip()
+        if line:
+            name, _, pinned = line.partition('==')
+            pins[name.strip().lower().replace('_', '-')] = pinned.strip()
+    return pins
+
+
+def check_image_dependencies(command, root):
+    """The built image must contain exactly the pinned dependency set."""
+    freeze = subprocess.run(command + ["exec", "-T", "relay", "pip", "freeze", "--exclude", "pip"],
+                            check=True, capture_output=True, text=True).stdout
+    pins = read_constraints(root / "constraints.txt")
+    installed = {}
+    for line in freeze.splitlines():
+        # Upstream itself is installed from the RELAY_REF archive ("name @ url").
+        name, _, pinned = line.split(' @ ', 1)[0].partition('==')
+        installed[name.strip().lower().replace('_', '-')] = pinned.strip()
+    installed.pop('pulsar-relay', None)
+    if installed != pins:
+        differing = sorted(set(installed.items()) ^ set(pins.items()))
+        raise RuntimeError(f"Relay image dependencies differ from constraints.txt: {differing}")
+    contract = (root / "scripts" / "upstream_contract.py").read_text()
+    subprocess.run(command + ["exec", "-T", "relay", "python", "-"], input=contract, text=True, check=True)
+    print(f"PASS: relay image has the {len(pins)} pinned dependencies and the upstream contract holds")
+
+
 def run_test(root, keep=False):
     if not shutil.which("docker"):
         raise RuntimeError("Docker is required for the live integration test; install Docker Engine and Compose v2")
@@ -52,7 +81,7 @@ def run_test(root, keep=False):
     project = "relay-test-" + secrets.token_hex(4)
     command = ["docker", "compose", "--project-directory", str(work), "-p", project]
     try:
-        for relative in ["Dockerfile", ".dockerignore", "compose.yml", "files/valkey.conf"]:
+        for relative in ["Dockerfile", "constraints.txt", ".dockerignore", "compose.yml", "files/valkey.conf"]:
             destination = work / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(root / relative, destination)
@@ -62,6 +91,7 @@ def run_test(root, keep=False):
         write_policy(work / '.policy', ['integration-admin'])
         subprocess.run(command + ["up", "--build", "--wait", "--wait-timeout", "180"], check=True)
         request(base, "/ready")
+        check_image_dependencies(command, root)
         request(base, "/api/v1/topics", expected=401)
         values = json.loads((work / "secrets.json").read_text())
         # The built-in Galaxy/Pulsar pair account exists after startup and is never an administrator.
