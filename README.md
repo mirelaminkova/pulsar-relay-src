@@ -6,7 +6,7 @@ Galaxy and Pulsar each connect to the relay to exchange job messages. **Files st
 
 As in the [SRC Pulsar component](https://github.com/ErasmusMC-Bioinformatics/src-component-pulsar), the workspace root (`https://WORKSPACE_HOST/`) is an SRAM-protected **welcome page** with copy-and-paste connection details: the relay URL, a built-in Galaxy/Pulsar pair account created at deployment, the topic prefix, and ready-made `job_conf.yml` and `app.yml` snippets. The relay serves nothing at exactly `/`, so every other path still reaches the relay API.
 
-The relay is built from upstream commit `048689a2b55192fda43fb4422ba99630051f2e09`. Valkey uses the upstream deployment's `9.0-trixie` image tag. Base image tags and Python dependency ranges can change; the complete dependency set is not locked. Review upgrades and run the live test before changing the relay revision in `Dockerfile`.
+The relay is built from upstream commit `048689a2b55192fda43fb4422ba99630051f2e09`. Valkey uses the upstream deployment's `9.0-trixie` image tag. The relay's Python dependencies are pinned exactly in `constraints.txt`, so rebuilding the image (which the playbook does whenever a deployment file changes) installs the same FastAPI, Starlette and uvicorn the wrapper was tested with; only the base image tags can still change. When changing the relay revision in `Dockerfile`, regenerate `constraints.txt` as described in its header and run the live test, which checks the image against the constraints and the upstream internals the wrapper relies on (`scripts/upstream_contract.py`).
 
 ## SRC catalog setup
 

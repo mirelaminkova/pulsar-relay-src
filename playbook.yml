@@ -71,6 +71,7 @@
         mode: "0644"
       loop:
         - Dockerfile
+        - constraints.txt
         - .dockerignore
         - compose.yml
         - files/valkey.conf
