@@ -54,7 +54,8 @@ async def lifespan(app):
     async with upstream_lifespan(app):
         # Storage is initialised by the upstream startup, so the built-in
         # Galaxy/Pulsar pair account can only be ensured afterwards.
-        await ensure_pair_account(dependencies.get_user_storage(), pair_username, pair_password)
+        await ensure_pair_account(dependencies.get_user_storage(), pair_username, pair_password,
+                                  dependencies.get_refresh_token_storage())
         yield
 
 

@@ -65,7 +65,9 @@ def run_test(root, keep=False):
         request(base, "/api/v1/topics", expected=401)
         values = json.loads((work / "secrets.json").read_text())
         # The built-in Galaxy/Pulsar pair account exists after startup and is never an administrator.
-        pair_token = login(base, "galaxy-pulsar", values["PULSAR_PAIR_PASSWORD"])
+        pair_session = request(base, "/auth/login", "POST", {"username": "galaxy-pulsar",
+                               "password": values["PULSAR_PAIR_PASSWORD"]}, form=True)
+        pair_token = pair_session["access_token"]
         request(base, "/auth/users", token=pair_token, expected=403)
         request(base, "/api/v1/topics", token=pair_token)
         write_policy(work / '.policy', ['integration-admin'])
@@ -99,15 +101,23 @@ def run_test(root, keep=False):
             raise RuntimeError("Published message was not delivered through long polling")
         print("PASS: SRAM admin mapping/revocation, forged-header rejection, machine permissions and message delivery")
         # Recreate both containers to prove storage survives beyond their lifetimes.
-        # The test's named volume is kept by down (without --volumes).
+        # The test's named volume is kept by down (without --volumes). Rotate the
+        # pair password meanwhile, as a changed SRC wizard parameter would.
         subprocess.run(command + ["down"], check=True)
+        rotated = secrets.token_hex(24)
+        configure(work, base, port, pair_password=rotated)
         subprocess.run(command + ["up", "--wait", "--wait-timeout", "180"], check=True)
         token = login(base, username, password)
         result = request(base, "/messages/poll", "POST", poll, token)
         if not any(message["payload"] == payload for message in result["messages"]):
             raise RuntimeError("Message did not survive container recreation")
-        login(base, "galaxy-pulsar", values["PULSAR_PAIR_PASSWORD"])
+        login(base, "galaxy-pulsar", rotated)
         print("PASS: user, topic, message and built-in pair account persisted after container recreation")
+        # The rotation revoked the session started with the old password.
+        request(base, "/auth/login", "POST", {"username": "galaxy-pulsar", "password": values["PULSAR_PAIR_PASSWORD"]},
+                form=True, expected=401)
+        request(base, "/auth/token/refresh", "POST", {"refresh_token": pair_session["refresh_token"]}, expected=401)
+        print("PASS: rotating the pair password revoked refresh tokens issued with the old one")
     finally:
         if keep:
             print(f"Test project retained in {work} (Compose project {project})")
