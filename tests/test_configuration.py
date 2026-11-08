@@ -47,7 +47,7 @@ class ConfigurationTest(unittest.TestCase):
             path = Path(directory)
             configure(directory, "https://relay.example.org")
             generated = json.loads((path / "secrets.json").read_text())
-            chosen = "Chosen-pair.pass_2026~ok"
+            chosen = "ChosenPairPass2026abcdefgh"
             self.assertTrue(configure(directory, "https://relay.example.org", pair_password=chosen))
             values = json.loads((path / "secrets.json").read_text())
             self.assertEqual(values["PULSAR_PAIR_PASSWORD"], chosen)
@@ -63,10 +63,79 @@ class ConfigurationTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             prepare(directory)
             for password in ["short-pass", "has space in it 123", "comma,in,password,1234", "colon:in:password:1234",
-                             "quote'password123456", "brace{password}12345", "x" * 129]:
+                             "quote'password123456", "brace{password}12345", "x" * 129,
+                             # Accepted by earlier versions, refused for new values now:
+                             "a" * 23, "@leading-at-sign-breaks-yaml", "%percent-is-a-yaml-indicator",
+                             "plus+changes+under+form+encoding", "Chosen-pair.pass_2026~ok"]:
                 with self.subTest(password=password), self.assertRaises(ValueError):
                     configure(directory, "https://relay.example.org", pair_password=password)
             self.assertFalse((Path(directory) / "secrets.json").exists())
+
+    def test_legacy_stored_password_can_be_resupplied_unchanged(self):
+        """An SRC redeploy re-sends the wizard value; a stored legacy-format value must not abort it."""
+        with tempfile.TemporaryDirectory() as directory:
+            prepare(directory)
+            path = Path(directory)
+            configure(directory, "https://relay.example.org")
+            values = json.loads((path / "secrets.json").read_text())
+            legacy = "Chosen-pair.pass_2026~ok"  # legacy charset, 24 characters
+            values["PULSAR_PAIR_PASSWORD"] = legacy
+            (path / "secrets.json").write_text(json.dumps(values, indent=2) + "\n")
+            configure(directory, "https://relay.example.org")  # settle relay.json
+            self.assertFalse(configure(directory, "https://relay.example.org", pair_password=legacy))
+            self.assertFalse(configure(directory, "https://relay.example.org"))
+            relay = json.loads((path / ".secrets" / "relay.json").read_text())
+            self.assertEqual(relay["pair_password"], legacy)
+            # A different legacy-format value is a new value and must meet the new policy ...
+            with self.assertRaises(ValueError):
+                configure(directory, "https://relay.example.org", pair_password="Other-legacy.pass_2026~ok")
+            self.assertEqual(json.loads((path / "secrets.json").read_text())["PULSAR_PAIR_PASSWORD"], legacy)
+            # ... and a policy-compliant value replaces it.
+            fresh = "A1b2C3d4" * 4
+            self.assertTrue(configure(directory, "https://relay.example.org", pair_password=fresh))
+            self.assertEqual(json.loads((path / "secrets.json").read_text())["PULSAR_PAIR_PASSWORD"], fresh)
+
+    def test_short_legacy_stored_password_keeps_working(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prepare(directory)
+            path = Path(directory)
+            configure(directory, "https://relay.example.org")
+            values = json.loads((path / "secrets.json").read_text())
+            values["PULSAR_PAIR_PASSWORD"] = "legacy@pass%16ch"  # 16 characters, legacy charset
+            (path / "secrets.json").write_text(json.dumps(values))
+            configure(directory, "https://relay.example.org")
+            self.assertFalse(configure(directory, "https://relay.example.org", pair_password="legacy@pass%16ch"))
+
+    def test_public_origin_is_normalised_like_a_browser_origin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            prepare(directory)
+            path = Path(directory)
+            for url, origin, host in [
+                ("https://Relay.Example.org:443", "https://relay.example.org", "relay.example.org"),
+                ("https://relay.example.org/", "https://relay.example.org", "relay.example.org"),
+                ("https://relay.example.org:8443", "https://relay.example.org:8443", "relay.example.org"),
+                ("http://localhost:80", "http://localhost", "localhost"),
+                ("http://127.0.0.1:18080", "http://127.0.0.1:18080", "127.0.0.1"),
+            ]:
+                with self.subTest(url=url):
+                    configure(directory, url)
+                    dotenv = (path / ".env").read_text()
+                    self.assertIn("PULSAR_ALLOWED_ORIGINS='" + json.dumps([origin]) + "'", dotenv)
+                    self.assertIn(json.dumps(host), dotenv)
+
+    def test_command_line_reports_rejections_without_the_password(self):
+        import os
+        import subprocess
+        with tempfile.TemporaryDirectory() as directory:
+            prepare(directory)
+            script = Path(__file__).resolve().parents[1] / "scripts" / "configure.py"
+            bad = "@not-a-valid-new-password-1"
+            result = subprocess.run([sys.executable, str(script), "--directory", directory,
+                                     "--public-url", "https://relay.example.org"],
+                                    env=dict(os.environ, RELAY_PAIR_PASSWORD=bad), capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, "error: A new pair password must be 24-128 letters and digits\n")
+            self.assertNotIn(bad, result.stdout + result.stderr)
 
     def test_rejects_invalid_pair_usernames(self):
         with tempfile.TemporaryDirectory() as directory:
