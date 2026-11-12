@@ -31,6 +31,11 @@ async def ensure_pair_account(storage, username, password):
             log.info('Created built-in pair account %s', username)
             return user
     changed = False
+    # The deployment configuration is authoritative for this account, as for its
+    # password: an account retired by an earlier BYOC switch is enabled again.
+    if not getattr(user, 'is_active', True):
+        user.is_active = True
+        changed = True
     if 'admin' in user.permissions:
         user.permissions = [p for p in user.permissions if p != 'admin']
         changed = True
@@ -41,3 +46,24 @@ async def ensure_pair_account(storage, username, password):
         user = await storage.update_user(user)
         log.info('Updated built-in pair account %s from the deployment configuration', username)
     return user
+
+
+async def retire_pair_accounts(storage, usernames, current):
+    """Deactivate earlier built-in pair accounts (renamed, or replaced by BYOC mode).
+
+    They still hold read/write on the relay with the old password, which the
+    welcome page no longer shows. Deactivated, not deleted: topics and
+    messages stay, and an administrator can enable an account again.
+    """
+    retired = []
+    for username in usernames or []:
+        if not username or username == current or username.startswith('sram:'):
+            continue
+        user = await storage.get_user_by_username(username)
+        if user is None or not getattr(user, 'is_active', True):
+            continue
+        user.is_active = False
+        await storage.update_user(user)
+        log.info('Deactivated earlier built-in pair account %s', username)
+        retired.append(username)
+    return retired

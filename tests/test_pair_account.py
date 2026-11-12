@@ -29,8 +29,9 @@ def install_stubs():
 
 
 class FakeUser:
-    def __init__(self, username, hashed_password, permissions):
+    def __init__(self, username, hashed_password, permissions, is_active=True):
         self.username, self.hashed_password, self.permissions = username, hashed_password, permissions
+        self.is_active = is_active
 
 
 class FakeStorage:
@@ -82,6 +83,32 @@ class PairAccountTest(unittest.TestCase):
         self.assertEqual(storage.updated, 1)
         self.assertIsNone(asyncio.run(self.pair.ensure_pair_account(storage, None, None)))
         self.assertEqual((storage.created, storage.updated), (0, 1))
+
+    def test_retires_earlier_pair_accounts_but_never_the_current_or_sram_ones(self):
+        storage = FakeStorage(self.jwt)
+        run = asyncio.run
+        for name in ['galaxy-pulsar', 'galaxy_old_byoc', 'galaxy_hpc_byoc', 'sram:alice']:
+            storage.users[name] = FakeUser(name, self.jwt.hash_password('p' * 64), ['read', 'write'])
+        retired = run(self.pair.retire_pair_accounts(
+            storage, ['galaxy-pulsar', 'galaxy_old_byoc', 'galaxy_hpc_byoc', 'sram:alice', 'missing', ''],
+            'galaxy_hpc_byoc'))
+        self.assertEqual(retired, ['galaxy-pulsar', 'galaxy_old_byoc'])
+        self.assertFalse(storage.users['galaxy-pulsar'].is_active)
+        self.assertFalse(storage.users['galaxy_old_byoc'].is_active)
+        self.assertTrue(storage.users['galaxy_hpc_byoc'].is_active)
+        self.assertTrue(storage.users['sram:alice'].is_active)
+        # Already inactive accounts are left alone.
+        self.assertEqual(run(self.pair.retire_pair_accounts(storage, ['galaxy-pulsar'], 'x')), [])
+        self.assertEqual(storage.updated, 2)
+        self.assertEqual(run(self.pair.retire_pair_accounts(storage, None, 'x')), [])
+
+    def test_current_pair_account_is_reactivated(self):
+        storage = FakeStorage(self.jwt)
+        storage.users['galaxy-pulsar'] = FakeUser('galaxy-pulsar', self.jwt.hash_password('p' * 64),
+                                                 ['read', 'write'], is_active=False)
+        user = asyncio.run(self.pair.ensure_pair_account(storage, 'galaxy-pulsar', 'p' * 64))
+        self.assertTrue(user.is_active)
+        self.assertEqual(storage.updated, 1)
 
 
 if __name__ == '__main__':
