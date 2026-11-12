@@ -1,0 +1,94 @@
+---
+# The BYOC connection state, as pulsar-rabbitmq-src records it: whether a Pulsar has
+# connected to this relay with the pair account (its capability topic exists) and
+# whether Galaxy has sent a job (the job_setup topic exists). Written with the
+# byoc_pulsar form (no password) to relay_byoc_state_file, shown on the welcome page.
+# A missing Pulsar is "waiting" for a standalone relay but an "error" for the
+# co-located one, which then fails the run after the state is recorded.
+- name: Sign in to the relay with the pair account
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ relay_port }}/auth/login"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      username: "{{ _relay_pair_username }}"
+      password: "{{ (_relay_secrets_file.content | b64decode | from_json).PULSAR_PAIR_PASSWORD }}"
+    status_code: 200
+  register: _relay_pair_login
+  failed_when: false
+  no_log: true
+
+# The co-located Pulsar may need a moment after its (re)start; a standalone relay
+# is checked once.
+- name: Look for Pulsar's capability topic on the relay
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ relay_port }}/api/v1/topics"
+    headers:
+      Authorization: "Bearer {{ _relay_pair_login.json.access_token }}"
+    return_content: true
+  register: _relay_topics
+  until: >-
+    _relay_capabilities_topic in
+    ((_relay_topics.json | default([])) | map(attribute='topic_name') | list)
+  retries: "{{ 24 if relay_install_pulsar | bool else 0 }}"
+  delay: 5
+  failed_when: false
+  no_log: true
+  when: _relay_pair_login.status | default(0) == 200
+
+- name: Record the relay connection state
+  ansible.builtin.set_fact:
+    _relay_byoc_state:
+      state: >-
+        {{ 'error' if _relay_pair_login.status | default(0) != 200
+           else 'connected' if _relay_capabilities_topic in _relay_topic_names
+           else 'error' if relay_install_pulsar | bool else 'waiting' }}
+      message: >-
+        {{ 'the pair account ' ~ _relay_pair_username ~ ' cannot sign in to the relay (HTTP '
+             ~ (_relay_pair_login.status | default('none')) ~ ')'
+             if _relay_pair_login.status | default(0) != 200
+           else 'Pulsar is connected to the relay as ' ~ _relay_pair_username
+             if _relay_capabilities_topic in _relay_topic_names
+           else 'the co-located Pulsar has not connected; see journalctl -u pulsar'
+             if relay_install_pulsar | bool
+           else 'no Pulsar has connected as ' ~ _relay_pair_username ~ ' yet' }}
+      checked_at: "{{ now(utc=true, fmt='%Y-%m-%dT%H:%M:%SZ') }}"
+      galaxy_seen: "{{ _relay_job_setup_topic in _relay_topic_names }}"
+  vars:
+    _relay_topic_names: >-
+      {{ (_relay_topics.json | default([])) | map(attribute='topic_name') | list
+         if _relay_topics.json is defined and _relay_topics.json is sequence
+         and _relay_topics.json is not string else [] }}
+
+- name: Write the BYOC connection record
+  ansible.builtin.copy:
+    content: "{{ _relay_byoc_record | to_nice_json }}\n"
+    dest: "{{ relay_byoc_state_file }}"
+    owner: root
+    group: root
+    mode: '0644'
+  vars:
+    _relay_byoc_record:
+      byoc: "{{ _relay_byoc | bool }}"
+      byoc_name: "{{ _relay_byoc_name }}"
+      relay_username: "{{ _relay_pair_username }}"
+      capabilities_topic: "{{ _relay_capabilities_topic }}"
+      form: "{{ _relay_byoc_form }}"
+      galaxy: "{{ _relay_byoc_galaxy if _relay_byoc | bool else {} }}"
+      connection: "{{ _relay_byoc_state }}"
+  # checked_at changes with every run: the file reports the check, it is no
+  # configuration change (a rerun must change nothing).
+  changed_when: false
+
+- name: Show the relay connection state
+  ansible.builtin.debug:
+    msg: "Relay connection {{ _relay_byoc_state.state }}: {{ _relay_byoc_state.message }}"
+
+- name: Template the welcome page with the connection state
+  ansible.builtin.include_tasks: tasks/welcome.yml
+  when: relay_configure_src_proxy | bool
+
+- name: Fail when the co-located Pulsar or the pair account does not work
+  ansible.builtin.fail:
+    msg: "{{ _relay_byoc_state.message }}"
+  when: _relay_byoc_state.state == 'error'
