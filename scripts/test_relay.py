@@ -26,6 +26,8 @@ def request(base, path, method="GET", data=None, token=None, form=False, expecte
         headers["Authorization"] = "Bearer " + token
     req = urllib.request.Request(base + path, data=body, headers=headers, method=method)
     try:
+        # The test's own http://127.0.0.1 URLs.
+        # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         with urllib.request.urlopen(req, timeout=15) as response:
             status, payload = response.status, response.read()
     except urllib.error.HTTPError as error:

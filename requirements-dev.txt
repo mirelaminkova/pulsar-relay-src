@@ -1,0 +1,24 @@
+# Development and CI tooling (unit tests, linters, git hooks).
+# Install into a virtualenv: python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
+pytest~=9.2.0
+pytest-cov~=7.1.0
+Jinja2~=3.1.6
+PyYAML~=6.0.3
+# The playbook's syntax check and ansible-lint; SRC itself runs ansible==14.6.0 (deploy.yml).
+ansible-core~=2.18.20
+ansible-lint~=26.11.0
+yamllint~=1.38.0
+ruff~=0.17.4
+pre-commit~=4.7.0
+ast-grep-cli~=0.51.2
+actionlint-py~=1.7.12.25
+# semgrep is not listed: it runs from pre-commit's own environment
+# (semgrep==1.184.0 in .pre-commit-config.yaml).
+# The end-to-end client (tests/e2e/) and its in-process round trip (tests/test_galaxy_e2e.py):
+# Pulsar and the relay client as the co-located Pulsar runs them (group_vars/all.yml), and the
+# relay server at the Dockerfile's RELAY_REF, run with the memory backend instead of Valkey.
+pulsar-app==0.15.15
+pulsar-relay-client==0.2.1
+psutil~=7.2.2
+pulsar-relay @ https://github.com/galaxyproject/pulsar-relay/archive/048689a2b55192fda43fb4422ba99630051f2e09.tar.gz
+uvicorn~=0.54.0
