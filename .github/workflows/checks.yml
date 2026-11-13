@@ -1,0 +1,63 @@
+---
+name: Checks
+on:
+  pull_request:
+    branches:
+      - main
+  # Every branch (not tags).
+  push:
+    branches:
+      - "**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pre-commit:
+    name: pre-commit (commit + push stages)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/pre-commit
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
+      - name: Install tooling
+        run: python -m pip install -r requirements-dev.txt
+      # ansible-lint resolves the roles and collections the playbook uses.
+      - name: Install Ansible dependencies
+        run: ansible-galaxy install -r requirements.yml
+      - name: pre-commit stage hooks
+        run: pre-commit run --all-files --show-diff-on-failure
+      - name: pre-push stage hooks (semgrep, ast-grep)
+        run: pre-commit run --hook-stage pre-push --all-files --show-diff-on-failure
+
+  pytest:
+    name: pytest (coverage gate)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install tooling
+        run: python -m pip install -r requirements-dev.txt
+      # Unit tests, and a Galaxy job through this component's relay app (memory backend) and
+      # an in-process Pulsar (tests/test_galaxy_e2e.py). deploy.yml runs the real deployment.
+      - name: pytest
+        run: pytest

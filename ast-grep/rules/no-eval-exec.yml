@@ -1,0 +1,14 @@
+---
+id: no-eval-exec
+language: python
+severity: error
+message: Do not use eval()/exec(); the deployment scripts and the relay must not run dynamic code.
+note: >-
+  scripts/configure.py and scripts/sync_admins.py run as root with the relay's secrets and
+  SRAM group data, and relay_src/ decides who is an administrator. Parse values explicitly
+  (int(), json.loads(), a lookup table).
+rule:
+  kind: call
+  has:
+    field: function
+    regex: ^(eval|exec|builtins\.eval|builtins\.exec)$

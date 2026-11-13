@@ -1,0 +1,69 @@
+# Tool configuration only: this repository is an Ansible component, not a Python package.
+
+[tool.pytest.ini_options]
+minversion = "9.0"
+testpaths = ["tests"]
+# scripts/ for configure.py and sync_admins.py, as the tests import them.
+pythonpath = [".", "scripts"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--import-mode=importlib",
+    "--cov",
+    "--cov-report=term-missing",
+]
+
+[tool.coverage.run]
+branch = true
+# The deployment's own Python: credential generation, the CO membership sync, the relay's
+# SRAM policy and pair account, and the end-to-end Galaxy client. app.py needs the relay
+# package (the Docker image) and test_relay.py Docker: both run in deploy.yml instead.
+source_dirs = ["scripts", "relay_src", "tests/e2e"]
+omit = ["scripts/test_relay.py", "relay_src/app.py"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+# The current floor; raise it with the tests, never lower it.
+fail_under = 93
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "S", "PT", "SIM", "RUF"]
+
+[tool.ruff.lint.isort]
+# The existing modules sort plain and from-imports together.
+force-sort-within-sections = true
+known-first-party = ["relay_src", "configure", "sync_admins", "tests"]
+# The upstream relay package in a block of its own, after the other third-party imports.
+section-order = ["future", "standard-library", "third-party", "pulsar-relay", "first-party", "local-folder"]
+
+[tool.ruff.lint.isort.sections]
+pulsar-relay = ["pulsar_relay"]
+
+[tool.ruff.lint.per-file-ignores]
+# assert is how pytest tests are written; the existing tests use unittest's assertions.
+"tests/**" = ["S101", "PT009", "PT027"]
+# FastAPI injects dependencies with Depends() in argument defaults; the one long line and the two
+# blank lines after the imports predate this configuration.
+"relay_src/app.py" = ["B008", "E501", "I001"]
+# A regular expression for passwords, not a password.
+"scripts/configure.py" = ["S105"]
+# Fixed argument lists (getent, docker compose) and the test's own localhost URLs.
+"scripts/sync_admins.py" = ["S603", "S607"]
+"scripts/test_relay.py" = ["S310", "S603", "S607", "RUF005"]
+
+[tool.ruff.format]
+# Existing modules are not ruff-formatted yet; formatting them here would collide with the
+# work on other branches. New files are formatted.
+exclude = [
+    "relay_src/*.py",
+    "scripts/*.py",
+    "tests/test_configuration.py",
+    "tests/test_pair_account.py",
+    "tests/test_sram_policy.py",
+]

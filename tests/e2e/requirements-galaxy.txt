@@ -1,0 +1,10 @@
+# The Galaxy side of the end-to-end test (tests/e2e/galaxy_job.py): Pulsar's client library as
+# Galaxy 26.1 pins it (lib/galaxy/dependencies/pinned-requirements.txt), with the relay client
+# the co-located Pulsar uses (group_vars/all.yml relay_pulsar_relay_client_version).
+pulsar-galaxy-lib==0.15.15
+pulsar-relay-client==0.2.1
+requests==2.34.2
+PyYAML==6.0.3
+# Galaxy's own packages that the client imports (in Galaxy's source tree, on PyPI separately).
+galaxy-util==26.1.2
+galaxy-tool-util==26.1.2
