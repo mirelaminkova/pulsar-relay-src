@@ -1,0 +1,169 @@
+---
+# The playbook on GitHub's Ubuntu runners as SRC runs it on a workspace, without SRC's nginx
+# and SRAM (relay_configure_src_proxy: false), with the co-located Pulsar: Docker Compose
+# builds the relay and starts Valkey (compose.yml), Pulsar connects to it with the generated
+# pair account. Then scripts/test_relay.py, and a Galaxy job through the deployed relay to that
+# Pulsar and back (tests/e2e/), before and after the relay's containers are recreated.
+name: Deploy
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+  # Weekly as well: base images, the relay's dependencies and the Apptainer PPA change.
+  schedule:
+    - cron: "23 4 * * 1"
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+# bash -eo pipefail: a failure before `| tee` fails the step.
+defaults:
+  run:
+    shell: bash
+jobs:
+  deploy:
+    name: deploy (${{ matrix.os }}, ${{ matrix.ansible }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+        # SRC's external Ansible plugin runs the playbook with remote_ansible_version 14.6.0
+        # (ansible-core 2.21); requirements-dev.txt's ansible-core is what contributors run.
+        ansible: ["ansible==14.6.0", "ansible-core~=2.18.20"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      # A pip requirement, through the environment rather than into the script.
+      ANSIBLE: ${{ matrix.ansible }}
+      # Plain recap lines for the idempotence check.
+      ANSIBLE_NOCOLOR: "1"
+      ANSIBLE_LOCALHOST_WARNING: "false"
+      RELAY: http://127.0.0.1:8080
+      INSTALL_DIR: /opt/pulsar-relay
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install Ansible
+        run: |
+          python -m pip install "$ANSIBLE"
+          ansible --version
+      - name: Install Ansible dependencies
+        run: ansible-galaxy install -r requirements.yml
+      - name: Write the component parameters
+        run: |
+          cat > "$RUNNER_TEMP/params.yml" <<'PARAMS'
+          ansible_python_interpreter: /usr/bin/python3
+          # As SRC passes them: strings, the pair password empty (generated on the workspace).
+          relay_port: "8080"
+          relay_pair_username: galaxy-pulsar
+          relay_pair_password: ""
+          relay_topic_prefix: src
+          relay_install_pulsar: "true"
+          relay_pulsar_cvmfs: "false"
+          relay_pulsar_root: ""
+          # No SRC nginx, SRAM or CO facts on a runner.
+          relay_configure_src_proxy: false
+          # The runner's Docker Engine comes from Docker's apt repository already; the role
+          # installs its packages without adding the repository a second time.
+          docker_add_repo: false
+          PARAMS
+      - name: Run the playbook
+        run: ansible-playbook -i localhost, -c local playbook.yml -e @"$RUNNER_TEMP/params.yml"
+      - name: Run the playbook again (idempotent)
+        run: |
+          ansible-playbook -i localhost, -c local playbook.yml -e @"$RUNNER_TEMP/params.yml" \
+            | tee "$RUNNER_TEMP/rerun.log"
+          grep -Eq 'localhost +: ok=[0-9]+ +changed=0 +unreachable=0 +failed=0 ' "$RUNNER_TEMP/rerun.log"
+
+      - name: Check the deployment
+        run: |
+          systemctl is-active docker pulsar pulsar-relay-admin-sync.timer
+          sudo docker compose -p pulsar-relay ps
+          for service in relay valkey; do
+            [ "$(sudo docker compose -p pulsar-relay ps --format '{{.Health}}' "$service")" = healthy ]
+          done
+          curl -fsS "$RELAY/ready"
+          # No anonymous access to the machine API.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' "$RELAY/api/v1/topics")" = 401 ]
+          # The relay listens on 127.0.0.1 only; Valkey publishes no port.
+          # (`! cmd` would not stop the step: bash -e ignores it.)
+          ss -ltnH | awk '{print $4}' | grep -E ':8080$' | tee "$RUNNER_TEMP/listen.txt"
+          if grep -vq '^127\.0\.0\.1:8080$' "$RUNNER_TEMP/listen.txt"; then exit 1; fi
+          if ss -ltnH | awk '{print $4}' | grep -q ':6379$'; then exit 1; fi
+          # Secrets and Pulsar's app.yml (which holds the pair password) stay private.
+          test "$(sudo stat -c '%U:%a' "$INSTALL_DIR/secrets.json")" = root:600
+          test "$(sudo stat -c '%U:%a' "$INSTALL_DIR/.env")" = root:600
+          test "$(sudo stat -c '%U:%G:%a' /opt/pulsar/config/app.yml)" = root:pulsar:640
+          # Pulsar runs as its own user, in relay mode, and is not an administrator.
+          test "$(systemctl show pulsar --property=User --value)" = pulsar
+          sudo grep -q "^message_queue_url: \"$RELAY\"$" /opt/pulsar/config/app.yml
+          id -nG pulsar | grep -qw docker
+          command -v singularity
+
+      # Its own disposable Compose project on a free port, next to the deployed one.
+      - name: Test relay delivery and persistence (scripts/test_relay.py)
+        run: python3 scripts/test_relay.py
+      - name: The deployed relay is untouched by the test project
+        run: |
+          curl -fsS "$RELAY/ready"
+          [ "$(sudo docker compose ls --format json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')" = 1 ]
+
+      # The job and its checks as a script, for the runs before and after the recreation.
+      - name: Install Galaxy's Pulsar client
+        run: |
+          python -m venv "$RUNNER_TEMP/galaxy"
+          "$RUNNER_TEMP/galaxy/bin/pip" install -r tests/e2e/requirements-galaxy.txt
+          cat > "$RUNNER_TEMP/galaxy-job" <<'SCRIPT'
+          #!/bin/bash
+          set -eo pipefail
+          "$RUNNER_TEMP/galaxy/bin/python" tests/e2e/galaxy_job.py "$RUNNER_TEMP/job.json" \
+            --timeout 300 --bind 127.0.0.1 | tee "$RUNNER_TEMP/result.json"
+          python3 - "$RUNNER_TEMP/result.json" <<'CHECK'
+          import json, sys
+          result = json.load(open(sys.argv[1]))
+          assert result["status"] == "complete" and result["returncode"] == 0, result
+          assert "running" in result["states"], result
+          assert result["inputs_served"] >= 1, result
+          assert result["received"]["output"] == "galaxy\npulsar\nrelay\n", result
+          # The co-located Pulsar ran it as its user, in its staging directory.
+          assert result["report"]["user"] == "pulsar", result
+          assert result["report"]["cwd"].startswith("/var/lib/pulsar/staging/"), result
+          CHECK
+          SCRIPT
+          chmod +x "$RUNNER_TEMP/galaxy-job"
+      # Galaxy's runner and environment from the deployment's pair password, as the welcome
+      # page prints them, but with the relay's local address (no SRC proxy here).
+      - name: Write Galaxy's job configuration
+        run: |
+          sudo cat "$INSTALL_DIR/secrets.json" > "$RUNNER_TEMP/secrets.json"
+          chmod 600 "$RUNNER_TEMP/secrets.json"
+          "$RUNNER_TEMP/galaxy/bin/python" -m tests.e2e.galaxy_config \
+            "$RUNNER_TEMP/secrets.json" "$RUNNER_TEMP/params.yml" http://127.0.0.1:0 \
+            > "$RUNNER_TEMP/job.json"
+          rm "$RUNNER_TEMP/secrets.json"
+      - name: Run a Galaxy job through the relay
+        run: '"$RUNNER_TEMP/galaxy-job"'
+
+      # Users, the pair account and the topics live in Valkey's volume; Pulsar keeps polling
+      # through the restart and picks up the next job.
+      - name: Recreate the relay's containers
+        run: |
+          sudo docker compose -p pulsar-relay --project-directory "$INSTALL_DIR" up -d --force-recreate --wait --wait-timeout 180
+          curl -fsS "$RELAY/ready"
+      - name: Run a Galaxy job through the recreated relay
+        run: '"$RUNNER_TEMP/galaxy-job"'
+
+      - name: Logs
+        if: always()
+        run: |
+          sudo journalctl -u pulsar --no-pager -n 100 || true
+          sudo docker compose -p pulsar-relay logs --no-color --tail 100 || true

@@ -9,3 +9,7 @@ __pycache__/
 *.pyc
 .ansible/
 .local-test/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*

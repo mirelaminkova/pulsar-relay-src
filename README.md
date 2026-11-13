@@ -24,6 +24,8 @@ The relay is built from upstream commit `048689a2b55192fda43fb4422ba99630051f2e0
    | `relay_topic_prefix` | `src` | Topic prefix shown on the welcome page; Galaxy and Pulsar must both use it |
    | `relay_install_pulsar` | `false` | `true` also installs Pulsar on this workspace, already connected to the relay (see below) |
    | `relay_pulsar_cvmfs` | `true` | With `relay_install_pulsar`, mounts the Galaxy project's CVMFS repositories (reference data and Singularity images) for that Pulsar; ignored without it |
+   | `relay_byoc` | `false` | `true` turns on [Galaxy BYOC mode](#galaxy-byoc-mode): the pair account and topic prefix become `galaxy_<BYOC name>_byoc` and the welcome page shows the `byoc_pulsar` form |
+   | `relay_byoc_name` | empty: generated | With `relay_byoc`, the BYOC name (the form's `username`): 3-32 of `a-z 0-9 _`, starting with a letter, not ending in `_` or `_byoc`, without `__`; leave empty to generate one (`src` and 8 hex digits) that is kept on the workspace |
 
 4. Create the workspace. Start with at least 2 vCPUs and 4 GB RAM; size for message volume. Keep it running while Galaxy and Pulsar need to communicate and choose an appropriate expiration date.
 5. Open `https://WORKSPACE_HOST/` (SRAM sign-in) for the welcome page with the Galaxy and Pulsar configuration, or `https://WORKSPACE_HOST/ready` to check readiness. CO administrators sign in through SRAM at `https://WORKSPACE_HOST/admin/docs`.
@@ -147,6 +149,71 @@ Which images Galaxy uses is decided by the Galaxy environment's `container_resol
 
 This combined mode suits SRC, where workspaces belong to a collaboration and expire: the relay and its Pulsar live and disappear together, and only Galaxy needs the welcome page values. Keep a standalone relay for several Pulsar workspaces, or use the Galaxy provider's relay (usegalaxy.eu runs one at `stargate.galaxyproject.eu`) when the Galaxy is not on SRC.
 
+## Galaxy BYOC mode
+
+Galaxy's "bring your own compute" (BYOC) flow lets a Galaxy user connect their own Pulsar: they fill in the `byoc_pulsar` section of their Galaxy preferences (*User → Preferences → Manage information*), and [byoc-sync](https://github.com/sanjaysrikakulam/elixir_biohackathon_2026_project1/tree/main/byoc-sync) turns that form into a pull request against the Galaxy's infrastructure playbook with a runner and a TPV destination for that user. With its **relay backend** (`backend: relay`), Galaxy reaches the Pulsar through a Pulsar Relay instead of RabbitMQ. This component then provides that relay, and with `relay_install_pulsar` the Pulsar too. It works the same way [pulsar-rabbitmq-src](https://github.com/mirelaminkova/pulsar-rabbitmq-src) works for the RabbitMQ backend.
+
+With `relay_byoc: true`:
+
+* **Naming.** The BYOC name is `relay_byoc_name`, else the one kept in `/opt/pulsar-relay/pair.json` by an earlier run, else a generated one (`src` and 8 hex digits). The built-in pair account and the topic prefix are both `galaxy_<name>_byoc`. byoc-sync fills in exactly these names when the form leaves `relay_username` and `relay_topic_prefix` empty; its Galaxy objects are runner `pulsar_eu_<name>_byoc`, destination `pulsar_<name>_byoc_tpv` and vault variable `relay_password_galaxy_<name>_byoc` (usegalaxy.eu's naming). `relay_pair_username` and `relay_topic_prefix` are ignored in this mode.
+* **Credentials.** The pair password is the form's `password`. It must be 16-128 letters and digits and must not be something YAML reads as a number (only digits, `0x…` or `0b…`), so that byoc-sync (both backends) and the relay variant of the BYOC sync on usegalaxy.eu's playbook accept it and Galaxy's job configuration reads it back unchanged. A generated password (64 hexadecimal characters, or 32 letters and digits) already qualifies. A password chosen earlier with other characters (`._~+=@%-`) is replaced by a generated one when BYOC mode starts. If `relay_pair_password` is given, it must follow these rules.
+* **Earlier pair accounts.** Turning BYOC mode on, or changing the BYOC name, changes the pair account's name. `configure.py` lists the earlier account in `pair.json` and the relay's configuration, and the relay deactivates it (`is_active: false`, not deleted) at its next start, because it still holds read/write access with a password the welcome page no longer shows. Turning BYOC mode off again restores `relay_pair_username` and reactivates that account. The relay always keeps the configured pair account active.
+* **The form.** `_relay_byoc_form` holds the `byoc_pulsar` values for the welcome page (the password is added from `_relay_pair_password`): `backend: relay`, `username` (the BYOC name), `password`, `relay_url` (this workspace's HTTPS origin), `relay_username` and `relay_topic_prefix`. With the co-located Pulsar it also lists `max_accepted_cores` (the workspace's vCPUs), `max_accepted_mem` (90% of its memory, whole GB), `min_accepted_gpus`/`max_accepted_gpus` (0) and `nfs_path` (Pulsar's root, `/var/lib/pulsar` by default). byoc-sync derives the destination's `jobs_directory` (`<nfs_path>/staging`), `persistence_directory` (`<nfs_path>/persisted_data`) and `SINGULARITY_CACHEDIR` (`<nfs_path>/var/database/container_cache`) from `nfs_path`. These are this Pulsar's directories; the playbook creates the cache directory. Without `nfs_path` the destination falls back to the Galaxy's default Pulsar directories, which do not exist here. Without a co-located Pulsar, enter your own Pulsar's limits and directory.
+* **Pulsar.** The co-located Pulsar's `app.yml` uses the BYOC account and topic prefix. Its manager is `_default_`, because byoc-sync's relay runner names no `manager`. It reaches the relay over `http://127.0.0.1:8080`, which is the same relay Galaxy reaches over HTTPS.
+* **Connection state.** Every run (except in check mode) signs in to the relay as the pair account and writes `/opt/pulsar-relay/byoc-connection.json` (`0644`, no password). The file holds the BYOC name, the form, byoc-sync's Galaxy names and the state: `connected` once a Pulsar's capability topic (`<prefix>_pulsar_capabilities`) exists, `waiting` while no Pulsar has connected to a relay without a co-located Pulsar, and `error` when the pair account cannot sign in or the co-located Pulsar has not connected. It also records `galaxy_seen`, true once Galaxy has sent a job (the `<prefix>_job_setup` topic exists), and `checked_at`. The welcome page is rendered again afterwards, with this state in `_relay_byoc_state`. An `error` fails the run, after the file is written. The file reports the latest check and is not counted as a change.
+
+The state file looks like this:
+
+```json
+{
+  "byoc": true,
+  "byoc_name": "hpc",
+  "relay_username": "galaxy_hpc_byoc",
+  "capabilities_topic": "galaxy_hpc_byoc_pulsar_capabilities",
+  "form": {"backend": "relay", "username": "hpc", "relay_url": "https://relay.example.org",
+           "relay_username": "galaxy_hpc_byoc", "relay_topic_prefix": "galaxy_hpc_byoc",
+           "max_accepted_cores": 4, "max_accepted_mem": 14, "min_accepted_gpus": 0,
+           "max_accepted_gpus": 0, "nfs_path": "/var/lib/pulsar"},
+  "galaxy": {"runner_id": "pulsar_eu_hpc_byoc", "destination_id": "pulsar_hpc_byoc_tpv",
+             "relay_vault_var": "relay_password_galaxy_hpc_byoc", "tag": "hpc-byoc-pulsar"},
+  "connection": {"state": "connected", "message": "Pulsar is connected to the relay as galaxy_hpc_byoc",
+                 "checked_at": "2026-11-12T15:00:00Z", "galaxy_seen": false}
+}
+```
+
+### A Galaxy without byoc-sync
+
+For a test Galaxy, put by hand into its `job_conf.yml` what byoc-sync would generate. With the BYOC name `hpc` and the co-located Pulsar:
+
+```yaml
+runners:
+  pulsar_eu_hpc_byoc:
+    load: galaxy.jobs.runners.pulsar:PulsarMQJobRunner
+    relay_url: https://YOUR-RELAY-HOST
+    relay_username: galaxy_hpc_byoc
+    relay_password: YOUR-PAIR-PASSWORD
+    relay_topic_prefix: galaxy_hpc_byoc
+    galaxy_url: https://YOUR-GALAXY-HOST
+
+execution:
+  environments:
+    pulsar_hpc_byoc_tpv:
+      runner: pulsar_eu_hpc_byoc
+      jobs_directory: /var/lib/pulsar/staging
+      persistence_directory: /var/lib/pulsar/persisted_data
+      default_file_action: remote_transfer
+      dependency_resolution: remote
+      rewrite_parameters: true
+      singularity_enabled: true
+      env:
+        - name: SINGULARITY_CACHEDIR
+          value: /var/lib/pulsar/var/database/container_cache
+```
+
+These runner parameters are the ones Galaxy 26.0, 26.1 and `dev` declare for the Pulsar runners (`relay_url`, `relay_username`, `relay_password`, `relay_topic_prefix`, `galaxy_url`). `PulsarMQJobRunner` already defaults to `remote_transfer`, `rewrite_parameters` and remote dependency resolution and requires `jobs_directory`. Route tools to `pulsar_hpc_byoc_tpv` as in [Galaxy and Pulsar configuration](#galaxy-and-pulsar-configuration). On usegalaxy.eu, byoc-sync writes the same runner and a TPV destination with the user's limits and an owner guard.
+
+`tests/test_byoc_contract.py` checks this contract against byoc-sync's own code, vendored in `tests/byoc_contract/` (see its README): the BYOC name rules, the account and topic names, the password rules on both backends, the form passing byoc-sync's validation, and the runner and destination rendered from byoc-sync's templates matching the co-located Pulsar's `app.yml` and directories. With `BYOC_SYNC_REPO` set to a checkout of the byoc-sync repository, it also checks that the vendored files are still current.
+
 ## Testing
 
 ```bash
@@ -155,7 +222,7 @@ ansible-playbook -i localhost, playbook.yml --syntax-check
 python3 scripts/test_relay.py
 ```
 
-The first command checks credential retention/migration, private file permissions, input validation, the built-in pair account bootstrap, proxy identity verification, CO membership revocation, stale-policy rejection, and exclusion of secrets from Compose metadata. The Ansible check requires the installed dependencies from `requirements.yml`.
+The first command needs only the standard library; with PyYAML, Jinja2 and ansible-core installed it also runs the BYOC contract tests, which resolve `group_vars` and render the templates as the playbook does. It checks the BYOC contract with byoc-sync, the BYOC credentials and pair-account retirement, the connection state, credential retention/migration, private file permissions, input validation, the built-in pair account bootstrap, proxy identity verification, CO membership revocation, stale-policy rejection, and exclusion of secrets from Compose metadata. The Ansible check requires the installed dependencies from `requirements.yml`.
 
 The live test builds the actual relay and starts Valkey in a randomly named disposable Compose project on a free localhost port. It checks readiness, rejection of anonymous access, the built-in pair account's login and lack of administrative rights, trusted SRAM proxy identities, forged-header rejection, administrator revocation, non-admin machine permissions, publishing, long-poll delivery, and survival of users/topics/messages when both containers are recreated. It removes only its own test containers and volume. Use `--keep` to retain the test project for inspection. It does not test Galaxy job execution or SRC's public TLS/SRAM infrastructure; validate those on an SRC workspace with a real Galaxy/Pulsar pair.
 

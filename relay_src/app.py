@@ -13,7 +13,7 @@ from pulsar_relay.auth import dependencies
 from pulsar_relay.auth.jwt import create_access_token
 from pulsar_relay.auth.models import User
 
-from .pair import ensure_pair_account
+from .pair import ensure_pair_account, retire_pair_accounts
 from .policy import effective_permissions, trusted_admin
 
 
@@ -21,6 +21,7 @@ config = json.loads(Path(os.environ['PULSAR_CONFIG_FILE']).read_text())
 proxy_secret = config['src_proxy_secret']
 pair_username = config.get('pair_username')
 pair_password = config.get('pair_password')
+retired_pair_usernames = config.get('retired_pair_usernames', [])
 policy_path = os.environ.get('SRC_ADMIN_POLICY_FILE', '/etc/relay-policy/admins.json')
 original_validate = upstream.validate_startup_secrets
 
@@ -54,7 +55,9 @@ async def lifespan(app):
     async with upstream_lifespan(app):
         # Storage is initialised by the upstream startup, so the built-in
         # Galaxy/Pulsar pair account can only be ensured afterwards.
-        await ensure_pair_account(dependencies.get_user_storage(), pair_username, pair_password)
+        storage = dependencies.get_user_storage()
+        await ensure_pair_account(storage, pair_username, pair_password)
+        await retire_pair_accounts(storage, retired_pair_usernames, pair_username)
         yield
 
 

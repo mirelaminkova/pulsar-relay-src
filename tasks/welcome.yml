@@ -1,0 +1,12 @@
+---
+- name: Template the SRAM-protected welcome page with connection details
+  ansible.builtin.template:
+    src: templates/welcome.html.j2
+    dest: "{{ relay_welcome_dir }}/index.html"
+    owner: root
+    group: www-data
+    mode: '0640'
+  vars:
+    _relay_pair_password: "{{ (_relay_secrets_file.content | b64decode | from_json).PULSAR_PAIR_PASSWORD }}"
+  no_log: true
+  diff: false

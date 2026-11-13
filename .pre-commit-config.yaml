@@ -1,0 +1,109 @@
+---
+# Install both hook types: pre-commit install --hook-type pre-commit --hook-type pre-push
+# Run everything:          pre-commit run --all-files
+#                          pre-commit run --hook-stage pre-push --all-files
+# Versions of the local Python hooks match requirements-dev.txt; keep them in sync.
+default_install_hook_types: [pre-commit, pre-push]
+default_stages: [pre-commit]
+# pulsar-app 0.15.15 needs Python <= 3.12 (Cheetah imports cgi, removed in 3.13), as in CI.
+default_language_version:
+  python: python3.12
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: check-json
+      - id: detect-private-key
+
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.38.0
+    hooks:
+      - id: yamllint
+        args: [--strict]
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.4
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      # Local instead of the upstream hook: ansible-lint installs requirements.yml
+      # (git clones). git exports GIT_INDEX_FILE to hooks, and an inherited value
+      # makes those clones overwrite this repository's index during `git commit`.
+      - id: ansible-lint
+        name: ansible-lint
+        entry: env -u GIT_INDEX_FILE -u GIT_DIR -u GIT_WORK_TREE ansible-lint
+        language: python
+        additional_dependencies: [ansible-lint==26.11.0, ansible-core==2.18.20]
+        files: \.(ya?ml|j2)$
+        pass_filenames: false
+
+      # Without the coverage gate (checks.yml enforces it on the whole suite).
+      - id: pytest
+        name: pytest
+        entry: pytest --no-cov -q
+        language: python
+        additional_dependencies:
+          - pytest==9.2.0
+          - pytest-cov==7.1.0
+          - Jinja2==3.1.6
+          - PyYAML==6.0.3
+          - pulsar-app==0.15.15
+          - pulsar-relay-client==0.2.1
+          - psutil==7.2.2
+          - pulsar-relay @ https://github.com/galaxyproject/pulsar-relay/archive/048689a2b55192fda43fb4422ba99630051f2e09.tar.gz
+          - uvicorn==0.54.0
+        files: |
+          (?x)^(
+            (tests|scripts|relay_src|files|group_vars)/
+            | pyproject\.toml$ | requirements-dev\.txt$ | \.pre-commit-config\.yaml$
+          )
+        pass_filenames: false
+
+      - id: actionlint
+        name: actionlint (GitHub Actions workflows)
+        entry: actionlint
+        language: python
+        additional_dependencies: [actionlint-py==1.7.12.25]
+        files: ^\.github/workflows/
+        pass_filenames: false
+
+      - id: ast-grep-test
+        name: ast-grep rule tests
+        entry: ast-grep test --skip-snapshot-tests
+        language: python
+        additional_dependencies: [ast-grep-cli==0.51.2]
+        files: ^(sgconfig\.yml$|ast-grep/)
+        pass_filenames: false
+
+      # pre-push: block the push on any finding. Excluded rule: insecure-file-permissions flags
+      # every mode but 0o644, including scripts/configure.py's 0o700 on its private secrets
+      # directory (stricter, not looser). Put a nosemgrep comment there and drop the exclusion.
+      - id: semgrep
+        name: semgrep (p/default, p/secrets)
+        entry: >-
+          semgrep scan --config p/default --config p/secrets --error --metrics=off --quiet
+          --exclude-rule python.lang.security.audit.insecure-file-permissions.insecure-file-permissions
+        language: python
+        additional_dependencies: [semgrep==1.184.0]
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
+      - id: ast-grep-scan
+        name: ast-grep scan
+        entry: ast-grep scan --error
+        language: python
+        additional_dependencies: [ast-grep-cli==0.51.2]
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]

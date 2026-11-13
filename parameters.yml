@@ -10,4 +10,10 @@ relay_install_pulsar: "false"
 # With relay_install_pulsar, mount the Galaxy CVMFS repositories (reference data and
 # Singularity images under /cvmfs) for that Pulsar. "false" leaves CVMFS out.
 relay_pulsar_cvmfs: "true"
+# "true": Galaxy BYOC mode. The pair account becomes galaxy_<relay_byoc_name>_byoc, as
+# byoc-sync names a BYOC endpoint, and the welcome page shows the byoc_pulsar form.
+relay_byoc: "false"
+# The BYOC name: 3-32 of a-z 0-9 _, starting with a letter, not ending in _ or _byoc,
+# without __. Empty: generated ("src" and 8 hex digits) and kept on the workspace.
+relay_byoc_name: ""
 # Add relay_public_url as a component parameter if hostname autodetection is wrong.
