@@ -1,10 +1,26 @@
 {% set _relay_welcome_singularity = relay_install_pulsar | bool and relay_pulsar_apptainer | bool %}
 {% set _relay_welcome_cvmfs = _relay_pulsar_cvmfs | bool %}
+{% set fqdn = workspace_fqdn | default(ansible_fqdn, true) %}
+{% set env = 'remote_' ~ (ansible_hostname | replace('.', '-') | replace('_', '-')) %}
+{# BYOC mode (a Galaxy user's byoc_pulsar form). The relay backend may not provide these
+   yet, so every one is guarded: without them the page shows the plain relay setup. #}
+{% set form = _relay_byoc_form if (_relay_byoc_form is defined and _relay_byoc_form is mapping) else {} %}
+{% set byoc = (relay_byoc | default(false) | bool) or (form | length > 0) %}
+{% set byoc_name = _relay_byoc_name | default(form.username | default(''), true) %}
+{% set byoc_password = form.password | default(_relay_pair_password, true) %}
+{# The connection check's state; anything malformed renders as "not checked yet". #}
+{% set s = _relay_byoc_state if (_relay_byoc_state is defined and _relay_byoc_state is mapping) else {} %}
+{% set reported = s.state | default('') %}
+{% set state = reported if reported in ('connected', 'waiting', 'error') else 'unknown' %}
+{# byoc_pulsar form fields in the form's order; unknown extra fields follow. #}
+{% set order = ['username', 'password', 'max_accepted_cores', 'max_accepted_mem', 'min_accepted_gpus', 'max_accepted_gpus', 'nfs_path'] %}
+{% set units = {'max_accepted_mem': 'GB'} %}
+{% set fields = order | select('in', form.keys() | list + ['password']) | list + (form.keys() | reject('in', order) | list) %}
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>Pulsar Relay Configuration</title>
+  <title>Pulsar Relay</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex">
   <link rel="stylesheet"
@@ -16,8 +32,9 @@
       --brand-bg: #0b1f3a;
       --page-bg:  #ffffff;
       --brand-fg: #ffffff;
+      --border:   #e1e4e8;
     }
-    html, body { height: 100%; margin: 0; }
+    html, body { margin: 0; }
     body { background: var(--page-bg); color: #222; }
     .brand-bar{
       background: var(--brand-bg); color: var(--brand-fg);
@@ -31,19 +48,54 @@
       margin: 0; font-size: 1.25rem; font-weight: 600; line-height: 1; color: var(--brand-fg);
       text-align: center;
     }
-    main { max-width: 1000px; margin: 2rem auto; padding: 0 1rem; }
-    .copy-box { position: relative; border: 1px solid #e1e4e8; border-radius: 8px; padding: .75rem; background: #fafafa; }
-    .copy-box pre { margin: 0; overflow-x: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-    .copy-btn {
-      position: absolute; top: .5rem; right: .5rem;
-      border: 1px solid #d0d7de; border-radius: 6px; background: #f6f8fa;
-      padding: .25rem .5rem; cursor: pointer;
+    main { max-width: 800px; margin: 1.5rem auto; padding: 0 1rem; }
+    .notice { font-size: .9rem; color: #555; margin: 0 0 1rem; }
+    .card { border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+    .card h2 { font-size: 1.1rem; margin: 0 0 .75rem; }
+    .card h3 { font-size: .95rem; margin: 1rem 0 .4rem; }
+    .card p { margin: .5rem 0; }
+    .card ul { margin: .5rem 0; }
+    dl { display: grid; grid-template-columns: max-content 1fr; gap: .35rem 1rem; margin: 0; }
+    dt { font-weight: 600; }
+    dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+    .tags { list-style: none; display: flex; flex-wrap: wrap; gap: .4rem; margin: 0; padding: 0; }
+    .tag {
+      font-size: .8rem; line-height: 1; padding: .3rem .5rem; margin: 0;
+      border: 1px solid var(--brand-bg); border-radius: 999px; color: var(--brand-bg);
     }
-    .warning { background: #fff8e1; border: 1px solid #ffe08a; padding: .75rem; border-radius: 6px; }
-    .flow { background: #f2f6fb; border-radius: 8px; padding: .75rem 1rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre; overflow-x: auto; }
-    code { white-space: nowrap; background: #f2f2f2; padding: 0 .25rem; border-radius: 4px; }
+    .state {
+      display: inline-block; font-size: .85rem; font-weight: 600; line-height: 1;
+      padding: .3rem .6rem; border-radius: 999px; border: 1px solid transparent;
+    }
+    .state-connected { background: #dafbe1; border-color: #1a7f37; color: #1a7f37; }
+    .state-waiting { background: #fff8c5; border-color: #9a6700; color: #9a6700; }
+    .state-error { background: #ffebe9; border-color: #cf222e; color: #cf222e; }
+    .state-unknown { background: #f2f2f2; border-color: #6e7781; color: #57606a; }
+    .copy-btn {
+      border: 1px solid #d0d7de; border-radius: 6px; background: #f6f8fa;
+      padding: .15rem .5rem; margin: 0 0 0 .25rem; font-size: .8rem; line-height: 1.4;
+      cursor: pointer; vertical-align: baseline;
+    }
+    .snippet { border: 1px solid var(--border); border-radius: 6px; margin: .5rem 0; background: #fafafa; }
+    .snippet-head {
+      display: flex; align-items: center; justify-content: space-between; gap: .5rem;
+      padding: .3rem .5rem; border-bottom: 1px solid var(--border); font-size: .8rem; color: #555;
+    }
+    .snippet pre {
+      margin: 0; padding: .6rem .75rem; overflow-x: auto; font-size: .8rem; line-height: 1.45;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; background: transparent; border: 0;
+    }
+    .commands { margin: 0; padding-left: 1.25rem; }
+    .commands li { margin: .25rem 0; }
+    details > summary { cursor: pointer; font-weight: 600; }
+    code { background: #f2f2f2; padding: 0 .25rem; border-radius: 4px; overflow-wrap: anywhere; }
     a { color: #0b1f3a; text-decoration: none; }
     a:hover { text-decoration: underline; }
+    @media (max-width: 600px) {
+      dl { grid-template-columns: 1fr; gap: .1rem 0; }
+      dt { margin-top: .5rem; }
+      .brand-title { position: static; transform: none; }
+    }
   </style>
 </head>
 
@@ -56,7 +108,7 @@
              alt="Pulsar logo">
       </a>
     </div>
-    <h1 class="brand-title">Pulsar Relay Configuration</h1>
+    <h1 class="brand-title">Pulsar Relay</h1>
     <div class="brand-right">
       <a href="https://www.surf.nl/en" target="_blank" rel="noopener">
         <img class="brand-logo"
@@ -67,76 +119,125 @@
   </header>
 
   <main>
-    <p><strong>Auto-generated as part of deployment.</strong> This page is only shown to signed-in members of the collaboration; it contains the credentials that Galaxy and Pulsar use to reach this relay.</p>
+    <p class="notice">Shown to signed-in members of the collaboration only: this page contains the password Galaxy and Pulsar use to reach this relay.</p>
 
-    <section>
-      <h2>About</h2>
-      <ul>
-        <li><strong>Admins:</strong> {{ (fact_co_groups | default({})).get(relay_admin_co_group, []) | reject('equalto', '') | join(', ') | default('none yet', true) }}</li>
-        <li><strong>Workspace FQDN:</strong> {{ workspace_fqdn | default(ansible_fqdn, true) }}</li>
-        <li><strong>Relay URL:</strong> <code>{{ relay_public_url }}</code></li>
-        <li><strong>Readiness:</strong> <a href="{{ relay_public_url }}/ready">{{ relay_public_url }}/ready</a></li>
-        <li><strong>Management (CO admins, SRAM sign-in):</strong> <a href="{{ relay_public_url }}/admin/docs">{{ relay_public_url }}/admin/docs</a></li>
-        <li><strong>Built-in pair account:</strong> <code>{{ relay_pair_username }}</code> (permissions: read, write)</li>
-        <li><strong>Topic prefix:</strong> <code>{{ relay_topic_prefix }}</code></li>
-      </ul>
+{% if byoc %}
+    <section class="card">
+      <h2>Enter this in Galaxy</h2>
+      <dl>
+{% for field in fields %}
+{% set value = byoc_password if field == 'password' else form[field] %}
+        <dt>{{ field | e }}</dt>
+        <dd><code id="byoc-{{ field | e }}">{{ value | e }}</code> <button class="copy-btn" type="button" onclick="copyValue('byoc-{{ field | e }}', this)">Copy</button>{{ (' ' ~ units[field]) if field in units else '' }}</dd>
+{% endfor %}
+      </dl>
+      <p>Open your Galaxy's User &rsaquo; Preferences &rsaquo; Manage information &rsaquo; <code>byoc_pulsar</code> and enter these values; after a Galaxy admin has merged your request, Galaxy sends your jobs through this relay (reload this page to see the state).</p>
     </section>
 
-    <section>
-      <h2>How the relay connects Galaxy and Pulsar</h2>
-      <p>Unlike the HTTP (REST) Pulsar workspace, Galaxy never talks to Pulsar directly. Both sign in to this relay with the <em>same</em> account and exchange job messages through it. Only files still go straight from Pulsar to Galaxy, so the Pulsar workspace must be able to reach Galaxy's URL.</p>
-<div class="flow">Galaxy ──POST job messages──▶ {{ workspace_fqdn | default(ansible_fqdn, true) }} ◀──long-poll── Pulsar
-                                                                     │
-Galaxy ◀──────────── direct HTTPS for input/output files ────────────┘</div>
-      <p>Three things must match on both sides: the relay URL, the pair account and the topic prefix. The values below already agree with each other.</p>
-    </section>
-
-    <section>
-      <h2>Connect a Galaxy workspace</h2>
-
-      <h3>Option A: SRC Galaxy component parameters</h3>
-      <p>When creating a <strong>new Galaxy workspace</strong> with a Galaxy component that supports relay mode, paste this <strong>entire line</strong> into the <strong>"Connect existing Pulsar relay"</strong> parameter (<code>src_galaxy_pulsar_relay_configs</code>):</p>
-      <div class="copy-box">
-        <button class="copy-btn" onclick="copyToClipboard('galaxy-relay-param', this)">Copy</button>
-        <pre id="galaxy-relay-param">[{name: {{ ansible_hostname | replace('.', '-') | replace('_', '-') }}, relay_url: {{ relay_public_url }}, relay_username: {{ relay_pair_username }}, relay_password: {{ _relay_pair_password }}, relay_topic_prefix: {{ relay_topic_prefix }}, jobs_directory: {{ relay_galaxy_jobs_directory }}{% if _relay_welcome_singularity %}, singularity_enabled: true{% endif %}}]</pre>
-      </div>
-      <p>And this line into <strong>"Send tools to Pulsar"</strong>, replacing <code>bwa</code> and <code>bowtie2</code> with your tool IDs:</p>
-      <div class="copy-box">
-        <button class="copy-btn" onclick="copyToClipboard('galaxy-relay-tools', this)">Copy</button>
-        <pre id="galaxy-relay-tools">[{tool_id: bwa, environment: remote_{{ ansible_hostname | replace('.', '-') | replace('_', '-') }}}, {tool_id: bowtie2, environment: remote_{{ ansible_hostname | replace('.', '-') | replace('_', '-') }}}]</pre>
-      </div>
-      <div class="warning">
-        <strong>Important Notes:</strong>
-        <ul>
-          <li>Copy the <strong>entire line</strong> including all brackets <code>[ ]</code>. Do NOT add extra quotes.</li>
-          <li>Keep the Galaxy parameter <em>API exposed</em> enabled: Pulsar fetches inputs and returns outputs through Galaxy's <code>/api/</code>.</li>
-          <li>The older <strong>"Connect existing Pulsar"</strong> parameter is for HTTP (REST) Pulsar only; it cannot use this relay.</li>
-{% if _relay_welcome_singularity %}
-          <li><code>singularity_enabled: true</code> runs each tool in its BioContainer with Apptainer on this workspace. The Galaxy component resolves images with <code>mulled_singularity</code>, so Apptainer pulls them from <code>quay.io</code> on first use{% if _relay_welcome_cvmfs %}; to use the prebuilt images under <code>/cvmfs/singularity.galaxyproject.org</code> instead, configure the environment as in Option B{% endif %}.</li>
 {% endif %}
-        </ul>
-      </div>
+    <section class="card">
+      <h2>Status</h2>
+      <dl>
+{% if byoc %}
+        <dt>Connection</dt>
+        <dd>
+{% if state == 'connected' %}
+          <span class="state state-connected">Connected</span> Galaxy accepts this Pulsar; jobs can arrive
+{% elif state == 'waiting' %}
+          <span class="state state-waiting">Waiting</span> waiting for the Galaxy admins to create your account
+{% elif state == 'error' %}
+          <span class="state state-error">Error</span> {{ (s.message | default('', true) or 'the connection check failed') | e }}
+{% else %}
+          <span class="state state-unknown">Not checked yet</span> the connection check has not run yet
+{% endif %}
+        </dd>
+{% if byoc_name %}
+        <dt>BYOC name</dt>
+        <dd><code>{{ byoc_name | e }}</code></dd>
+{% endif %}
+{% endif %}
+        <dt>Relay</dt>
+        <dd><code>{{ relay_public_url | e }}</code>, <a href="{{ relay_public_url | e }}/ready">readiness</a></dd>
+        <dt>Pair account</dt>
+        <dd><code>{{ relay_pair_username | e }}</code> (read, write), topic prefix <code>{{ relay_topic_prefix | e }}</code></dd>
+        <dt>Pulsar</dt>
+{% if relay_install_pulsar | bool %}
+        <dd>{{ relay_pulsar_version | e }} on <code>{{ fqdn | e }}</code>, staging <code>{{ relay_pulsar_staging_dir | e }}</code></dd>
+        <dt>Containers</dt>
+{% if relay_pulsar_docker | bool or relay_pulsar_apptainer | bool or _relay_welcome_cvmfs %}
+        <dd>
+          <ul class="tags" role="list">
+{% if relay_pulsar_docker | bool %}
+            <li class="tag">Docker</li>
+{% endif %}
+{% if relay_pulsar_apptainer | bool %}
+            <li class="tag">Apptainer</li>
+{% endif %}
+{% if _relay_welcome_cvmfs %}
+            <li class="tag">CVMFS</li>
+{% endif %}
+          </ul>
+        </dd>
+{% else %}
+        <dd>none</dd>
+{% endif %}
+{% else %}
+        <dd>not on this workspace: connect one below</dd>
+{% endif %}
+        <dt>Admins</dt>
+        <dd>{{ ((fact_co_groups | default({})).get(relay_admin_co_group, []) | reject('equalto', '') | join(', ') | default('none yet', true)) | e }}, <a href="{{ relay_public_url | e }}/admin/docs">management</a></dd>
+      </dl>
+    </section>
 
-      <h3>Option B: edit the job configuration</h3>
-      <p>For an existing Galaxy (26.0 or newer), merge this into its job configuration, for example <code>/srv/galaxy/config/job_conf.yml</code>. Keep your existing runners, environments and default destination.</p>
-      <div class="copy-box">
-        <button class="copy-btn" onclick="copyToClipboard('galaxy-job-conf', this)">Copy</button>
+    <section class="card">
+      <h2>Connect a Galaxy</h2>
+      <p>Galaxy and Pulsar sign in to this relay with the <em>same</em> account and topic prefix and exchange job messages through it; only files go straight from Pulsar to Galaxy's <code>/api/</code>.</p>
+      <dl>
+        <dt>relay_url</dt>
+        <dd><code id="relay-url">{{ relay_public_url | e }}</code> <button class="copy-btn" type="button" onclick="copyValue('relay-url', this)">Copy</button></dd>
+        <dt>relay_username</dt>
+        <dd><code id="relay-username">{{ relay_pair_username | e }}</code> <button class="copy-btn" type="button" onclick="copyValue('relay-username', this)">Copy</button></dd>
+        <dt>relay_password</dt>
+        <dd><code id="relay-password">{{ _relay_pair_password | e }}</code> <button class="copy-btn" type="button" onclick="copyValue('relay-password', this)">Copy</button></dd>
+        <dt>relay_topic_prefix</dt>
+        <dd><code id="relay-topic-prefix">{{ relay_topic_prefix | e }}</code> <button class="copy-btn" type="button" onclick="copyValue('relay-topic-prefix', this)">Copy</button></dd>
+        <dt>jobs_directory</dt>
+        <dd><code id="relay-jobs-directory">{{ relay_galaxy_jobs_directory | e }}</code> <button class="copy-btn" type="button" onclick="copyValue('relay-jobs-directory', this)">Copy</button></dd>
+      </dl>
+
+      <h3>SRC Galaxy component</h3>
+      <p>Paste the entire line, brackets included and without extra quotes, into <strong>"Connect existing Pulsar relay"</strong> (<code>src_galaxy_pulsar_relay_configs</code>):</p>
+      <div class="snippet">
+        <div class="snippet-head"><span>src_galaxy_pulsar_relay_configs</span><button class="copy-btn" type="button" onclick="copyValue('galaxy-relay-param', this)">Copy</button></div>
+        <pre id="galaxy-relay-param">[{name: {{ ansible_hostname | replace('.', '-') | replace('_', '-') | e }}, relay_url: {{ relay_public_url | e }}, relay_username: {{ relay_pair_username | e }}, relay_password: {{ _relay_pair_password | e }}, relay_topic_prefix: {{ relay_topic_prefix | e }}, jobs_directory: {{ relay_galaxy_jobs_directory | e }}{% if _relay_welcome_singularity %}, singularity_enabled: true{% endif %}}]</pre>
+      </div>
+      <p>And into <strong>"Send tools to Pulsar"</strong>, with your tool IDs instead of <code>bwa</code> and <code>bowtie2</code>:</p>
+      <div class="snippet">
+        <div class="snippet-head"><span>Send tools to Pulsar</span><button class="copy-btn" type="button" onclick="copyValue('galaxy-relay-tools', this)">Copy</button></div>
+        <pre id="galaxy-relay-tools">[{tool_id: bwa, environment: {{ env | e }}}, {tool_id: bowtie2, environment: {{ env | e }}}]</pre>
+      </div>
+      <p>Keep <em>API exposed</em> enabled. The older "Connect existing Pulsar" parameter is for HTTP Pulsar only.</p>
+
+      <h3>Galaxy <code>job_conf.yml</code></h3>
+      <p>For any other Galaxy (26.0 or newer), merge this into its job configuration and restart Galaxy; replace <code>GALAXY_WORKSPACE_FQDN</code> with Galaxy's hostname and keep the file readable by the Galaxy user only.</p>
+      <div class="snippet">
+        <div class="snippet-head"><span>job_conf.yml</span><button class="copy-btn" type="button" onclick="copyValue('galaxy-job-conf', this)">Copy</button></div>
         <pre id="galaxy-job-conf">runners:
   pulsar_relay:
     load: galaxy.jobs.runners.pulsar:PulsarMQJobRunner
-    relay_url: {{ relay_public_url }}
-    relay_username: {{ relay_pair_username }}
-    relay_password: {{ _relay_pair_password }}
-    relay_topic_prefix: {{ relay_topic_prefix }}
+    relay_url: {{ relay_public_url | e }}
+    relay_username: {{ relay_pair_username | e }}
+    relay_password: {{ _relay_pair_password | e }}
+    relay_topic_prefix: {{ relay_topic_prefix | e }}
     # Galaxy's own public URL: Pulsar fetches inputs and returns outputs here.
     galaxy_url: https://GALAXY_WORKSPACE_FQDN
 
 execution:
   environments:
-    remote_{{ ansible_hostname | replace('.', '-') | replace('_', '-') }}:
+    {{ env | e }}:
       runner: pulsar_relay
       # Pulsar's staging directory (staging_directory in Pulsar's app.yml).
-      jobs_directory: {{ relay_galaxy_jobs_directory }}
+      jobs_directory: {{ relay_galaxy_jobs_directory | e }}
       manager: _default_
       dependency_resolution: remote
       default_file_action: remote_transfer
@@ -158,99 +259,85 @@ execution:
 
 tools:
   - id: bwa
-    environment: remote_{{ ansible_hostname | replace('.', '-') | replace('_', '-') }}
+    environment: {{ env | e }}
   - id: bowtie2
-    environment: remote_{{ ansible_hostname | replace('.', '-') | replace('_', '-') }}</pre>
+    environment: {{ env | e }}</pre>
       </div>
-      <ul>
-        <li>Replace <code>GALAXY_WORKSPACE_FQDN</code> with the Galaxy hostname. With the relay runner, Galaxy ignores a <code>url</code> on the environment; its address comes from <code>galaxy_url</code> on the runner.</li>
-        <li>The file contains the pair password: keep it readable by the Galaxy user only. Then restart Galaxy with <code>sudo systemctl restart 'galaxy-*'</code>.</li>
-      </ul>
     </section>
 
-    <section>
+    <section class="card">
 {% if relay_install_pulsar | bool %}
       <h2>Pulsar on this workspace</h2>
-      <p>Pulsar {{ relay_pulsar_version }} is installed here and already connected to this relay as <code>{{ relay_pair_username }}</code> with topic prefix <code>{{ relay_topic_prefix }}</code>. Jobs run directly on this workspace{% if relay_pulsar_docker | bool %}, and tools can use Docker containers{% endif %}{% if relay_pulsar_apptainer | bool %}{% if relay_pulsar_docker | bool %} or{% else %}, and tools can use{% endif %} Singularity containers (Apptainer){% endif %}. Nothing needs to be copied for Pulsar.</p>
+      <p>Pulsar {{ relay_pulsar_version | e }} runs here, already connected to this relay as <code>{{ relay_pair_username | e }}</code> with topic prefix <code>{{ relay_topic_prefix | e }}</code>; nothing needs to be copied for it. Jobs run directly on this workspace.</p>
       <ul>
-        <li><strong>Staging directory:</strong> <code>{{ relay_pulsar_staging_dir }}</code>, which Galaxy uses as <code>jobs_directory</code></li>
+        <li>Configuration: <code>{{ relay_pulsar_config_dir | e }}/app.yml</code></li>
 {% if _relay_welcome_cvmfs %}
-        <li><strong>CVMFS:</strong> the Galaxy project repositories are mounted under <code>/cvmfs</code> (reference data in <code>data.galaxyproject.org</code>, container images in <code>singularity.galaxyproject.org</code>) and bound into every Apptainer container, so Galaxy's tool data tables and CVMFS image paths work in jobs here</li>
+        <li>CVMFS: <code>/cvmfs/data.galaxyproject.org</code> and <code>/cvmfs/singularity.galaxyproject.org</code>, bound into every Apptainer container</li>
 {% endif %}
-        <li><strong>Configuration:</strong> <code>{{ relay_pulsar_config_dir }}/app.yml</code></li>
-        <li><strong>Status:</strong> <code>systemctl status pulsar</code> and <code>journalctl -u pulsar -f</code></li>
       </ul>
 {% else %}
-      <h2>Connect a Pulsar workspace</h2>
-      <p>For an SRC Pulsar workspace whose component supports message queues, set these parameters when creating it:</p>
-      <div class="copy-box">
-        <button class="copy-btn" onclick="copyToClipboard('pulsar-src-params', this)">Copy</button>
-        <pre id="pulsar-src-params">src_pulsar_message_queue_url: {{ relay_public_url }}
-src_pulsar_relay_username: {{ relay_pair_username }}
-src_pulsar_relay_password: {{ _relay_pair_password }}
-src_pulsar_relay_topic_prefix: {{ relay_topic_prefix }}</pre>
+      <h2>Connect a Pulsar</h2>
+      <p>Add these lines to Pulsar's <code>app.yml</code> and restart it; an <code>https://</code> <code>message_queue_url</code> switches Pulsar to relay mode. Pulsar needs <code>pulsar-app</code> 0.15.15 or newer with <code>pulsar-relay-client</code> {{ relay_pulsar_relay_client_version | e }}, and must be able to open <code>https://GALAXY_WORKSPACE_FQDN/api/</code>.</p>
+      <div class="snippet">
+        <div class="snippet-head"><span>app.yml</span><button class="copy-btn" type="button" onclick="copyValue('pulsar-app-yml', this)">Copy</button></div>
+        <pre id="pulsar-app-yml">message_queue_url: {{ relay_public_url | e }}
+message_queue_username: {{ relay_pair_username | e }}
+message_queue_password: {{ _relay_pair_password | e }}
+relay_topic_prefix: {{ relay_topic_prefix | e }}</pre>
       </div>
-      <p>For any other Pulsar, add these lines to its <code>app.yml</code> and restart it. An <code>https://</code> <code>message_queue_url</code> switches Pulsar to relay mode.</p>
-      <div class="copy-box">
-        <button class="copy-btn" onclick="copyToClipboard('pulsar-app-yml', this)">Copy</button>
-        <pre id="pulsar-app-yml">message_queue_url: {{ relay_public_url }}
-message_queue_username: {{ relay_pair_username }}
-message_queue_password: {{ _relay_pair_password }}
-relay_topic_prefix: {{ relay_topic_prefix }}</pre>
+      <p>For an SRC Pulsar workspace whose component supports message queues, use these parameters instead:</p>
+      <div class="snippet">
+        <div class="snippet-head"><span>SRC Pulsar parameters</span><button class="copy-btn" type="button" onclick="copyValue('pulsar-src-params', this)">Copy</button></div>
+        <pre id="pulsar-src-params">src_pulsar_message_queue_url: {{ relay_public_url | e }}
+src_pulsar_relay_username: {{ relay_pair_username | e }}
+src_pulsar_relay_password: {{ _relay_pair_password | e }}
+src_pulsar_relay_topic_prefix: {{ relay_topic_prefix | e }}</pre>
       </div>
-      <div class="warning">
-        <strong>Important Notes:</strong>
-        <ul>
-          <li>Pulsar needs <code>pulsar-app</code> 0.15.15 or newer with <code>pulsar-relay-client</code> {{ relay_pulsar_relay_client_version }}, the combination usegalaxy.eu runs against its relay.</li>
-          <li>Use one Pulsar per pair account and topic prefix. Register a second account below for a second pair.</li>
-          <li>Pulsar must be able to open <code>https://GALAXY_WORKSPACE_FQDN/api/</code>; the relay does not carry files.</li>
-        </ul>
-      </div>
+      <p>Use one Pulsar per pair account and topic prefix.</p>
 {% endif %}
     </section>
 
-    <section>
+    <section class="card">
       <h2>Additional Galaxy/Pulsar pairs</h2>
-      <p>CO administrators can create more machine accounts. Open <a href="{{ relay_public_url }}/admin/docs">{{ relay_public_url }}/admin/docs</a> (SRAM sign-in), expand <code>POST /auth/register</code> and submit:</p>
-      <div class="copy-box">
-        <button class="copy-btn" onclick="copyToClipboard('register-body', this)">Copy</button>
+      <p>CO administrators can create more machine accounts: open <a href="{{ relay_public_url | e }}/admin/docs">{{ relay_public_url | e }}/admin/docs</a> (SRAM sign-in), expand <code>POST /auth/register</code> and submit the body below. Give that pair its own <code>relay_topic_prefix</code> on both ends.</p>
+      <div class="snippet">
+        <div class="snippet-head"><span>POST /auth/register</span><button class="copy-btn" type="button" onclick="copyValue('register-body', this)">Copy</button></div>
         <pre id="register-body">{
   "username": "second-pair",
   "password": "REPLACE-WITH-A-LONG-RANDOM-PASSWORD",
   "permissions": ["read", "write"]
 }</pre>
       </div>
-      <p>Give that pair its own <code>relay_topic_prefix</code> on both ends. Topics are namespaced per account, so two accounts cannot see each other's messages even with the same prefix.</p>
     </section>
 
-    <details>
-      <summary>Checking and debugging the relay</summary>
-      <h3>From anywhere</h3>
-      <pre>curl {{ relay_public_url }}/ready</pre>
-      <h3>On this workspace</h3>
-<pre>sudo docker compose -p pulsar-relay --project-directory {{ relay_install_dir }} ps
-sudo docker compose -p pulsar-relay --project-directory {{ relay_install_dir }} logs --tail 100 relay
-systemctl status pulsar-relay-admin-sync.timer</pre>
-      <p>After both sides are configured, <code>GET /api/v1/topics</code> on the management page lists the <code>{{ relay_topic_prefix }}_job_*</code> topics that Galaxy and Pulsar created, and <code>{{ relay_topic_prefix }}_pulsar_capabilities</code> shows that Pulsar connected.</p>
-      <p>Rotating the pair password: edit <code>PULSAR_PAIR_PASSWORD</code> in <code>{{ relay_install_dir }}/secrets.json</code>, rerun the component (or <code>scripts/configure.py</code> and <code>docker compose up -d --force-recreate</code>), then update Galaxy and Pulsar. This page is regenerated when the component reruns.</p>
-    </details>
-
-    <details>
-      <summary>Deployment settings</summary>
-      <ul>
-        <li><strong>Install directory:</strong> <code>{{ relay_install_dir }}</code></li>
-        <li><strong>Local relay port:</strong> <code>{{ relay_port }}</code> (bound to 127.0.0.1 only)</li>
-        <li><strong>CO administrator group:</strong> <code>{{ relay_admin_co_group }}</code></li>
-        <li><strong>Host:</strong> <code>{{ inventory_hostname }}</code> ({{ ansible_distribution }} {{ ansible_distribution_version }})</li>
+    <section class="card">
+      <h2>Troubleshooting</h2>
+      <ul class="commands">
+        <li>Readiness: <code>curl {{ relay_public_url | e }}/ready</code></li>
+        <li>Containers: <code>sudo docker compose -p pulsar-relay --project-directory {{ relay_install_dir | e }} ps</code></li>
+        <li>Relay log: <code>sudo docker compose -p pulsar-relay --project-directory {{ relay_install_dir | e }} logs --tail 100 relay</code></li>
+        <li>Admin sync: <code>systemctl status pulsar-relay-admin-sync.timer</code></li>
+{% if relay_install_pulsar | bool %}
+        <li>Pulsar: <code>systemctl status pulsar</code>, <code>journalctl -u pulsar -f</code></li>
+{% endif %}
+        <li>Topics: <code>GET /api/v1/topics</code> on the management page lists <code>{{ relay_topic_prefix | e }}_job_*</code>; <code>{{ relay_topic_prefix | e }}_pulsar_capabilities</code> shows that Pulsar connected</li>
       </ul>
-    </details>
+      <details>
+        <summary>Rotating the pair password and deployment settings</summary>
+        <p>Edit <code>PULSAR_PAIR_PASSWORD</code> in <code>{{ relay_install_dir | e }}/secrets.json</code>, rerun the component, then update Galaxy and Pulsar. This page is regenerated when the component reruns.</p>
+        <ul>
+          <li>Local relay port <code>{{ relay_port | e }}</code> (127.0.0.1 only), CO administrator group <code>{{ relay_admin_co_group | e }}</code></li>
+          <li>Host <code>{{ inventory_hostname | e }}</code> ({{ ansible_distribution | e }} {{ ansible_distribution_version | e }})</li>
+        </ul>
+      </details>
+    </section>
   </main>
 
 <script>
-  function copyToClipboard(targetId, btn) {
+  function copyValue(targetId, btn) {
     const node = document.getElementById(targetId);
     if (!node) return;
-    const text = node.innerText || node.textContent || "";
+    const text = node.textContent || "";
     if (navigator.clipboard && window.isSecureContext) {
       navigator.clipboard.writeText(text)
         .then(() => flash(btn))
