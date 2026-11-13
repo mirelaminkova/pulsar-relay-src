@@ -20,6 +20,25 @@
           topic prefix, pair password (empty, or 16-128 of A-Z a-z 0-9 . _ ~ + = @ % -),
           relay port (digits), and relay_pulsar_root (empty, or an absolute path).
 
+    # byoc-sync's rules for the form's username (the BYOC name), and a password and relay
+    # URL that both byoc-sync and the relay variant of the BYOC sync (usegalaxy.eu playbook,
+    # scripts/byoc/byoc_sync.py) accept, so the welcome page's form passes validation.
+    - name: Validate the Galaxy BYOC mode parameters
+      ansible.builtin.assert:
+        that:
+          - (relay_byoc_name | default('', true) | length == 0) or
+            (relay_byoc_name is match('^[a-z][a-z0-9_]{2,31}$') and relay_byoc_name is not match('.*(_|_byoc)$')
+             and '__' not in relay_byoc_name)
+          - (relay_pair_password | default('', true) | length == 0) or
+            (relay_pair_password is match('^[A-Za-z0-9]{16,128}$')
+             and relay_pair_password is not match('^([0-9]+|0x[0-9A-Fa-f]+|0b[01]+)$'))
+          - relay_public_url is match('^https://([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(:[0-9]{1,5})?/?$')
+        fail_msg: >-
+          BYOC mode: relay_byoc_name must be empty or 3-32 of a-z 0-9 _ (starting with a letter, not ending
+          in _ or _byoc, without __); relay_pair_password empty or 16-128 letters and digits (not only digits); and relay_public_url
+          the https:// origin of a DNS name.
+      when: _relay_byoc | bool
+
     - name: Set workspace user and CO group facts as in the Galaxy component
       ansible.builtin.include_role:
         name: uusrc.general.fact_regular_users
@@ -84,22 +103,33 @@
 
     - name: Generate and retain workspace credentials
       ansible.builtin.command:
-        argv:
-          - python3
-          - "{{ relay_install_dir }}/scripts/configure.py"
-          - --directory
-          - "{{ relay_install_dir }}"
-          - --public-url
-          - "{{ relay_public_url }}"
-          - --port
-          - "{{ relay_port | string }}"
-          - --pair-username
-          - "{{ relay_pair_username }}"
+        argv: >-
+          {{ ['python3', relay_install_dir ~ '/scripts/configure.py',
+              '--directory', relay_install_dir,
+              '--public-url', relay_public_url,
+              '--port', relay_port | string,
+              '--pair-username', relay_pair_username,
+              '--byoc-name', relay_byoc_name | default('', true) | string]
+             + (['--byoc'] if _relay_byoc | bool else []) }}
       environment:
         RELAY_PAIR_PASSWORD: "{{ relay_pair_password | default('', true) }}"
       register: relay_configuration
       changed_when: relay_configuration.stdout == 'changed'
       no_log: true
+
+    # The pair account in effect (galaxy_<BYOC name>_byoc in BYOC mode) and the BYOC name,
+    # as configure.py recorded them; no secrets in this file.
+    - name: Read the pair account record
+      ansible.builtin.slurp:
+        src: "{{ relay_install_dir }}/pair.json"
+      register: _relay_pair_file
+
+    - name: Use the pair account in effect
+      ansible.builtin.set_fact:
+        _relay_pair_username: "{{ _relay_pair_record.pair_username }}"
+        _relay_byoc_name: "{{ _relay_pair_record.byoc_name | default('', true) }}"
+      vars:
+        _relay_pair_record: "{{ _relay_pair_file.content | b64decode | from_json }}"
 
     - name: Initialize administrator membership from the SRC CO facts
       ansible.builtin.copy:
@@ -158,18 +188,11 @@
         mode: '0750'
       when: relay_configure_src_proxy | bool
 
+    # Written here so the page exists even when a later step fails, and again by
+    # tasks/connection.yml with the connection state.
     - name: Template the SRAM-protected welcome page with connection details
-      ansible.builtin.template:
-        src: templates/welcome.html.j2
-        dest: "{{ relay_welcome_dir }}/index.html"
-        owner: root
-        group: www-data
-        mode: '0640'
-      vars:
-        _relay_pair_password: "{{ (_relay_secrets_file.content | b64decode | from_json).PULSAR_PAIR_PASSWORD }}"
+      ansible.builtin.include_tasks: tasks/welcome.yml
       when: relay_configure_src_proxy | bool
-      no_log: true
-      diff: false
 
     - name: Configure SRC HTTPS reverse proxy
       ansible.builtin.include_role:
@@ -220,6 +243,11 @@
     - name: Install Pulsar on this workspace, connected to the relay
       ansible.builtin.include_tasks: tasks/pulsar.yml
       when: relay_install_pulsar | bool
+
+    # Not in check mode, where nothing was started: the state then stays "unknown".
+    - name: Record the BYOC connection state
+      ansible.builtin.include_tasks: tasks/connection.yml
+      when: not ansible_check_mode
 
   handlers:
     - name: Restart Pulsar

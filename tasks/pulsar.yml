@@ -30,6 +30,9 @@
     - {path: "{{ _relay_pulsar_root }}", owner: "{{ relay_pulsar_user }}", mode: '0750'}
     - {path: "{{ relay_pulsar_staging_dir }}", owner: "{{ relay_pulsar_user }}", mode: '0750'}
     - {path: "{{ relay_pulsar_persistence_dir }}", owner: "{{ relay_pulsar_user }}", mode: '0750'}
+    - {path: "{{ relay_pulsar_container_cache_dir | dirname | dirname }}", owner: "{{ relay_pulsar_user }}", mode: '0750'}
+    - {path: "{{ relay_pulsar_container_cache_dir | dirname }}", owner: "{{ relay_pulsar_user }}", mode: '0750'}
+    - {path: "{{ relay_pulsar_container_cache_dir }}", owner: "{{ relay_pulsar_user }}", mode: '0750'}
 
 # No `creates:`, so a version change in group_vars upgrades the venv.
 - name: Install pulsar-app and the relay client into the venv
@@ -117,35 +120,7 @@
 - name: Apply pending Pulsar restarts before checking the connection
   ansible.builtin.meta: flush_handlers
 
-- name: Sign in to the relay with the pair account
-  ansible.builtin.uri:
-    url: "http://127.0.0.1:{{ relay_port }}/auth/login"
-    method: POST
-    body_format: form-urlencoded
-    body:
-      username: "{{ relay_pair_username }}"
-      password: "{{ (_relay_secrets_file.content | b64decode | from_json).PULSAR_PAIR_PASSWORD }}"
-    status_code: 200
-  register: _relay_pair_login
-  no_log: true
-
 # Pulsar 0.15.15 publishes a capability snapshot to "<prefix>_pulsar_capabilities"
 # when it binds to the relay, so its presence proves Pulsar reached the relay.
-- name: Wait until Pulsar has connected to the relay
-  ansible.builtin.uri:
-    url: "http://127.0.0.1:{{ relay_port }}/api/v1/topics"
-    headers:
-      Authorization: "Bearer {{ _relay_pair_login.json.access_token }}"
-    return_content: true
-  register: _relay_topics
-  vars:
-    _first_manager: "{{ relay_pulsar_managers | list | first }}"
-    _capabilities_topic: >-
-      {{ relay_topic_prefix ~ '_pulsar_capabilities' ~
-         ('' if _first_manager == '_default_' else '_' ~ _first_manager) }}
-  until: >-
-    _capabilities_topic in
-    ((_relay_topics.json | default([])) | map(attribute='topic_name') | list)
-  retries: 24
-  delay: 5
-  no_log: true
+# tasks/connection.yml signs in, waits for that topic, records the state and
+# fails the run when this Pulsar has not connected.

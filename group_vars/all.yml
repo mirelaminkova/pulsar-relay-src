@@ -13,6 +13,59 @@ relay_pair_password: ""
 relay_topic_prefix: src
 relay_welcome_dir: /srv/static
 
+# Galaxy BYOC ("bring your own compute") mode: the byoc_pulsar form in Galaxy's user
+# preferences, which byoc-sync (sanjaysrikakulam/elixir_biohackathon_2026_project1,
+# byoc-sync/) turns into Galaxy's runner and TPV destination. Its relay backend names
+# the relay account and topic prefix galaxy_<BYOC name>_byoc, as it names the RabbitMQ
+# user; in BYOC mode this relay uses exactly those, so relay_pair_username and
+# relay_topic_prefix are ignored. The BYOC name is relay_byoc_name, else the one kept in
+# <relay_install_dir>/pair.json, else generated. Use _relay_byoc, never relay_byoc.
+relay_byoc: false
+relay_byoc_name: ""
+_relay_byoc: "{{ relay_byoc | default(false, true) | bool }}"
+# The pair account and BYOC name in effect. The playbook sets both from pair.json
+# (written by scripts/configure.py) right after configuring; use these and
+# _relay_topic_prefix, never relay_pair_username or relay_topic_prefix, in templates.
+_relay_pair_username: "{{ relay_pair_username }}"
+_relay_byoc_name: "{{ relay_byoc_name | default('', true) }}"
+_relay_topic_prefix: "{{ ('galaxy_' ~ _relay_byoc_name ~ '_byoc') if _relay_byoc | bool else relay_topic_prefix }}"
+# byoc-sync's names for this BYOC name (its usegalaxy.eu site config, sites/eu.yml), for
+# the welcome page and a hand-edited job_conf.yml.
+_relay_byoc_galaxy:
+  runner_id: "pulsar_eu_{{ _relay_byoc_name }}_byoc"
+  destination_id: "pulsar_{{ _relay_byoc_name }}_byoc_tpv"
+  relay_vault_var: "relay_password_galaxy_{{ _relay_byoc_name }}_byoc"
+  tag: "{{ _relay_byoc_name | replace('_', '-') }}-byoc-pulsar"
+# The byoc_pulsar form for this relay, without the password (the welcome page adds
+# _relay_pair_password). relay_username and relay_topic_prefix are what byoc-sync fills in
+# when they are left empty. The limits and nfs_path only with the co-located Pulsar, which
+# runs the jobs here: byoc-sync derives jobs_directory (<nfs_path>/staging),
+# persistence_directory (<nfs_path>/persisted_data) and SINGULARITY_CACHEDIR
+# (<nfs_path>/var/database/container_cache) from nfs_path, which is Pulsar's root.
+_relay_byoc_form: >-
+  {{ {'backend': 'relay',
+      'username': _relay_byoc_name,
+      'relay_url': relay_public_url | regex_replace('/+$', ''),
+      'relay_username': _relay_pair_username,
+      'relay_topic_prefix': _relay_topic_prefix}
+     | combine({'max_accepted_cores': ansible_facts['processor_vcpus'] | default(1) | int,
+                'max_accepted_mem': [((ansible_facts['memtotal_mb'] | default(1024) | int)
+                                      * 0.9 / 1024) | int, 1] | max,
+                'min_accepted_gpus': 0,
+                'max_accepted_gpus': 0,
+                'nfs_path': _relay_pulsar_root} if relay_install_pulsar | bool else {}) }}
+# Pulsar publishes this topic when it binds to the relay (pulsar.messaging.bind_relay);
+# Galaxy's first job creates the job_setup topic. Both under the pair account.
+_relay_pulsar_manager: "{{ relay_pulsar_managers | list | first }}"
+_relay_manager_suffix: "{{ '' if _relay_pulsar_manager == '_default_' else '_' ~ _relay_pulsar_manager }}"
+_relay_capabilities_topic: "{{ _relay_topic_prefix }}_pulsar_capabilities{{ _relay_manager_suffix }}"
+_relay_job_setup_topic: "{{ _relay_topic_prefix }}_job_setup{{ _relay_manager_suffix }}"
+# The connection state (connected, waiting, error; unknown before the check runs, e.g. in
+# check mode), recorded by tasks/connection.yml in relay_byoc_state_file with the form
+# (never the password) and shown on the welcome page.
+_relay_byoc_state: {"state": "unknown", "message": "", "checked_at": "", "galaxy_seen": false}
+relay_byoc_state_file: "{{ relay_install_dir }}/byoc-connection.json"
+
 # Optional Pulsar on the same workspace, in relay mode (NEMO-style: pulsar-app
 # plus pulsar-relay-client in a venv, webless). It connects to this relay over
 # 127.0.0.1 with the built-in pair account, so no credentials are copied.
@@ -26,6 +79,8 @@ relay_pulsar_venv: /opt/pulsar/venv
 relay_pulsar_config_dir: /opt/pulsar/config
 relay_pulsar_staging_dir: "{{ _relay_pulsar_root }}/staging"
 relay_pulsar_persistence_dir: "{{ _relay_pulsar_root }}/persisted_data"
+# SINGULARITY_CACHEDIR of byoc-sync's destination (<nfs_path>/var/database/container_cache).
+relay_pulsar_container_cache_dir: "{{ _relay_pulsar_root }}/var/database/container_cache"
 # Versions run by usegalaxy.eu's NEMO endpoint against the relay; keep the
 # client in step with the relay release (v0.2.1 plus fixes in this component).
 relay_pulsar_version: "0.15.15"
